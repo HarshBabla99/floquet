@@ -1,15 +1,20 @@
 from __future__ import annotations
 
-import functools
-import warnings
+import jax
+from jax import Array
+import jax.numpy as jnp
+import jax.tree_util as jtu
+import dynamiqs as dq
+import optimistix as optx
 
-import numpy as np
-import qutip as qt
-import scipy as sp
+from jax import vmap, jit
+
+from jaxtyping import ArrayLike, Int, Float, Bool, Complex
+from typing import List
+
 
 from .model import Model
 from .options import Options
-from .utils.parallel import parallel_map
 
 
 class DisplacedState:
@@ -22,210 +27,142 @@ class DisplacedState:
         state_indices: States of interest
         options: Options used
     """
+    hilbert_dim: int
+    state_indices: list
+    exponent_pair: dict
+    fit_cutoff : int
+    fit_cutoff_omega_d : int
+    fit_cutoff_amp : int
 
     def __init__(
         self, hilbert_dim: int, model: Model, state_indices: list, options: Options
     ):
         self.hilbert_dim = hilbert_dim
-        self.model = model
         self.state_indices = state_indices
-        self.options = options
-        self.exponent_pair_idx_map = self._create_exponent_pair_idx_map()
 
-    def overlap_with_bare_states(
-        self, amp_idx_0: int, coefficients: np.ndarray, floquet_modes: np.ndarray
-    ) -> np.ndarray:
-        """Calculate overlap of floquet modes with 'bare' states.
+        self.fit_cutoff = self.options.fit_cutoff
+        self.fit_cutoff_omega_d = min(model.omega_d_values.shape[-1], self.options.fit_cutoff)
+        self.fit_cutoff_amp = min(model.drive_amplitudes.shape[-1], self.options.fit_cutoff)
 
-        'Bare' here is defined loosely. For the first range of amplitudes, the bare
-        states are truly the bare states (the coefficients are obtained from
-        bare_state_coefficients, which give the bare states). For later ranges, we
-        define the bare state as the state obtained from the fit from previous range,
-        with amplitude evaluated at the lower edge of amplitudes for the new region.
-        This is, in a sense, the most natural choice, since it is most analogous to what
-        is done in the first window when the overlap is computed against bare
-        eigenstates (that obviously don't have amplitude dependence). Moreover, the fit
-        coefficients for the previous window by definition were obtained in a window
-        that does not include the one we are currently investigating. Asking for the
-        state with amplitude values outside of the fit window should be done at your
-        own peril.
+        self.exponent_pair = self._create_exponent_pair()
+
+    def displaced_states(
+        self, 
+        omega_ds: Float[ArrayLike, 'num_omega_ds'],,
+        amps: Float[ArrayLike, 'num_amps'],
+        state_indices: int | List[int],
+        coefficients: Float[Array, 'num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms'],
+    ) -> dq.QArray:
+        """Construct an approximate displaced state, $\left| \tilde{i}(\omega_d, \xi) \right>$.
+        $$
+        \left| \tilde{i}(\omega_d, \xi) \right> = \sum_{j} \left| j \right> \left< j \middle| \tilde{i}(\omega_d, \xi) \right>
+        $$
+        where $\left| j \right>$ are the undriven (bare) states and the coefficients \left< j \middle| \tilde{i}(\omega_d, \xi) \right> are given by a polynomial fit. The polynomial is of the form:
+        $$
+            \left< j \middle| \tilde{i}(\omega_d, \xi) \right> = \sum_{\substack{k \ge 0, l>0 \\ k+l \leq \text{cutoff}}} C_{i,j,k,l}(\omega_d, \xi) \omega_d^k \xi^l
+        $$
+        where $C_{i,j,k,l}(\omega_d, \xi)$ are the coefficients to be fitted.
+
+        Note: Careful with the shape of the coefficients vs. that of the output.
 
         Parameters:
-            amp_idx_0: Index specifying the lower bound of the amplitude range.
-            coefficients: coefficients that specify the bare state that we calculate
-                overlaps of Floquet modes against
-            floquet_modes: Floquet modes to be compared to the bare states given by
-                coefficients
+            omega_ds: Drive frequency. Shape: (num_omega_ds,)
+            amps: Drive amplitude. Shape: (num_amps,)
+            state_indices: Indices of the states, $\left| \tilde{i}(\omega_d, \xi) \right>$ that we are interested in.
+            coefficients: Coefficients to expand the displaced state in terms of the undriven states. Shape: (num_state_indices, hilbert_dim, num_omega_ds, num_amps, num_fit_terms).
+
         Returns:
-            overlaps with shape (w,a,s) where w is the number of drive frequencies,
-                a is the number of drive amplitudes (specified by amp_idxs) and s is the
-                number of states we are investigating
+            result: The displaced state(s). Shape = (num_state_indices, num_omega_ds, num_amps, hilbert_dim, 1). Careful, that the first index is the array index, not the state index! For example, if state_indices = [0, 2], then result[0, ...] is the displaced state for state index 0, and result[1, ...] is the displaced state for state index 2.
         """
-        overlaps = np.zeros(floquet_modes.shape[:-1])
-        for array_idx, state_idx in enumerate(self.state_indices):
-            # Bind the array_idx variable to the function to prevent late-binding
-            # closure, see https://docs.python-guide.org/writing/gotchas/#late-binding-closures.
-            # This isn't actually a problem in our case but still nice practice to
-            # bind the value to the function
-            def _compute_bare_state(
-                omega_d: float, _array_idx: int = array_idx, _state_idx: int = state_idx
-            ) -> np.ndarray:
-                omega_d_idx = self.model.omega_d_to_idx(omega_d)
-                return self.displaced_state(
-                    omega_d,
-                    self.model.drive_amplitudes[amp_idx_0, omega_d_idx],
-                    _state_idx,
-                    coefficients=coefficients[_array_idx],
-                ).full()[:, 0]
+        # Vectorized bare_same, is a boolean vector with True when idx == state_idx
+        # shape should be (num_state_indices, hilbert_dim,)
+        vec_bare_same = (dq.fock(self.hilbert_dim, state_indices).to_jax() == 1)[...,0] 
 
-            bare_states = np.array(
-                [_compute_bare_state(omega_d) for omega_d in self.model.omega_d_values],
-                dtype=complex,
-            )
-            # bare states may differ as a function of omega_d, hence the bare states
-            # have an index of i that we don't sum over
-            # indices are i: omega_d, j: amp, k: components of state
-            overlaps[:, :, array_idx] = np.abs(
-                np.einsum(
-                    "ijk,ik->ij", floquet_modes[:, :, array_idx], np.conj(bare_states)
-                )
-            )
-        return overlaps
+        # Simply vectorize _compute_polynomial the basis vectors! Isn't that so cool? :)
+        _vmap_compute_polynomial = vmap(DisplacedState._compute_polynomial,
+                                       in_axes=(None, None, -4, None, -1), out_axes=-1)
 
-    def overlap_with_displaced_states(
-        self, amp_idxs: list, coefficients: np.ndarray, floquet_modes: np.ndarray
-    ) -> np.ndarray:
-        """Calculate overlap of floquet modes with 'ideal' displaced states.
+        # Vectorized function returns shape: (num_state_indices, hilbert_dim, num_omega_ds, num_amps, hilbert_dim). 
+        result = _vmap_compute_polynomial(omega_ds, amps, coefficients, self.exponent_pair, 
+                                          vec_bare_same)
 
-        This is done here for a specific amplitude range.
+        # Reshape to (num_state_indices, hilbert_dim, num_omega_ds, num_amps, hilbert_dim, 1).
+        return dq.as_qarray(result[..., None])
+
+    @staticmethod
+    @jit
+    def _compute_polynomial(
+        omega_ds: Float[ArrayLike, 'num_omega_ds'],
+        amps: Float[ArrayLike, 'num_amps'],
+        coefficients: Float[Array, '... num_omega_ds num_amps num_fit_terms'],
+        exponent_pair: Int[Array, '2 num_fit_terms'],
+        bare_same: Bool[ArrayLike, '...'],
+    ) -> ArrayLike:
+        """Evaluate the polynomial function to approximate the overlap. This polynomial is of the form:
+        $$
+            \left< j \middle| \tilde{i}(\omega_d, \xi) \right> = \sum_{\substack{k \ge 0, l>0 \\ k+l \leq \text{cutoff}}} C_{i,j,k,l}(\omega_d, \xi) \omega_d^k \xi^l
+        $$
+        where $C_{i,j,k,l}$ are the coefficients to be fitted.
 
         Parameters:
-            amp_idxs: list of lower and upper amplitude indices specifying the range of
-                drive amplitudes this calculation should be done for
-            coefficients: coefficients that specify the displaced state that we
-                calculate overlaps of Floquet modes against
-            floquet_modes: Floquet modes to be compared to the displaced states given by
-                coefficients
+            omega_d: Drive frequency. Shape: (num_omega_ds,)
+            amp: Drive amplitude. Shape: (num_amps,)
+            coefficients: Coefficients to be fitted, i.e., $C_{k,l}(\omega_d, \xi)$. Shape: (..., num_omega_ds, num_amps, num_fit_terms)
+            bare_same: Boolean indicating if the state is the same as the bare state. If yes, return 1 + result, else return result. Shape: (...,)
+
         Returns:
-            overlaps with shape (w,a,s) where w is the number of drive frequencies,
-                a is the number of drive amplitudes (specified by amp_idxs) and s is the
-                number of states we are investigating
+            result: The result of the polynomial function. Shape: (..., num_omega_ds, num_amps)
+        """ 
+
+        # Helper function to compute one term of the polynomial
+        def _poly_term(omega_d: ArrayLike, amp: ArrayLike, exponent_pair: ArrayLike,
+                       ) -> ArrayLike:
+            return (omega_d ** exponent_pair[0]) * (amp ** exponent_pair[1])
+
+        # Cartesian vmap (vmap in reverse order)
+        _cvmap_poly_term = vmap(vmap(vmap(_poly_term,
+               in_axes=(None,None,-1), out_axes=0), # vmap over exponents, shape: (2, num_fit_terms)
+               in_axes=(None,-1,None), out_axes=0), # vmap over amp      , shape: (num_amps,)
+               in_axes=(-1,None,None), out_axes=0)  # vmap over omega_d  , shape: (num_omega_d,)
+
+        # Get all the terms i.e. omega_d^k * amp^l, shape: (num_omega_ds, num_amps, num_fit_terms)
+        all_ploy_terms = _cvmap_poly_term(omega_ds, amps, exponent_pair)
+
+        # NOTE: coefficients.shape=(num_omega_ds, num_amps, num_fit_terms).
+        # This isn't explicitly validated. 
+        result = jnp.sum(coefficients * all_ploy_terms, axis = -1)
+        return jax.lax.cond(bare_same, lambda: 1.0 + result, lambda: result)
+
+
+    def _create_exponent_pair(self) -> dict:
+        """Create the pair of exponents for the polynomial to be fitted. The polynomial is of the form:
+        $$
+            \sum_{\substack{k \ge 0, l>0 \\ k+l \leq \text{cutoff}}} C_{k,l} \omega_d^k \xi^l
+        $$
+        where $C_{k,l}$ are the coefficients to be fitted. This function creates the (j,l) pairs
+
+        We truncate the fit if e.g. there is only a single frequency value to scan over but the fit is nominally set to order four. We additionally eliminate the constant term that should always be either zero or one.
+
+        Returns:
+            exponent_pair: A 2D array of shape (2,num_fit_terms) where the first column
+                contains the exponents for omega_d and the second column contains the exponents
+                for amplitude. The number of terms is determined by the cutoff value.
         """
 
-        def _run_overlap_displaced(omega_d_amp: tuple[float, float]) -> np.ndarray:
-            overlap = np.zeros(len(self.state_indices))
-            omega_d, amp = omega_d_amp
-            for array_idx, state_idx in enumerate(self.state_indices):
-                floquet_mode_for_idx = floquet_modes[
-                    self.model.omega_d_to_idx(omega_d),
-                    self.model.amp_to_idx(amp, omega_d),
-                    array_idx,
-                ]
-                disp_state = self.displaced_state(
-                    omega_d,
-                    amp,
-                    state_idx=state_idx,
-                    coefficients=coefficients[array_idx],
-                ).dag()
-                overlap[array_idx] = np.abs(
-                    disp_state.data.to_array()[0] @ floquet_mode_for_idx
-                )
-            return overlap
-
-        omega_d_amp_params = self.model.omega_d_amp_params(amp_idxs)
-        amp_range_vals = self.model.drive_amplitudes[amp_idxs[0] : amp_idxs[1]]
-        result = list(
-            parallel_map(
-                self.options.num_cpus, _run_overlap_displaced, omega_d_amp_params
-            )
-        )
-        return np.array(result).reshape(
-            (
-                len(self.model.omega_d_values),
-                len(amp_range_vals),
-                len(self.state_indices),
-            )
-        )
-
-    def bare_state_coefficients(self, state_idx: int) -> np.ndarray:
-        r"""For bare state only component is itself.
-
-        Parameters:
-            state_idx: Coefficients for the state $|state_idx\rangle$ that when
-                evaluated at any amplitude or frequency simply return the bare state.
-                Note that this should be the actual state index, and not the array index
-                (for instance if we have state_indices=[0, 1, 3] because we're not
-                interested in the second excited state, for the 3rd excited state we
-                should pass 3 here and not 2).
-        """
-        coefficient_matrix_for_amp_and_state = np.zeros(
-            (self.hilbert_dim, len(self.exponent_pair_idx_map)), dtype=complex
-        )
-        coefficient_matrix_for_amp_and_state[state_idx, 0] = 1.0
-        return coefficient_matrix_for_amp_and_state
-
-    def displaced_state(
-        self, omega_d: float, amp: float, state_idx: int, coefficients: np.ndarray
-    ) -> qt.Qobj:
-        """Construct the ideal displaced state based on a polynomial expansion."""
-        return sum(
-            self._coefficient_for_state(
-                np.array([omega_d, amp]),
-                *coefficients[state_idx_component, :],
-                bare_same=state_idx == state_idx_component,
-            )
-            * qt.basis(self.hilbert_dim, state_idx_component)
-            for state_idx_component in range(self.hilbert_dim)
-        ).unit()
-
-    def _coefficient_for_state(
-        self,
-        xydata: np.ndarray,
-        *state_idx_coefficients: np.ndarray | tuple,
-        bare_same: bool = False,
-    ) -> np.ndarray | float:
-        """Fit function to pass to curve fit, assume a 2D polynomial."""
-        exp_pair_map = self.exponent_pair_idx_map
-        omega_d, amp = xydata.T
-        result = 1.0 if bare_same else 0.0
-        result += sum(
-            state_idx_coefficients[idx]
-            * omega_d ** exp_pair_map[idx][0]
-            * amp ** exp_pair_map[idx][1]
-            for idx in exp_pair_map
-        )
-        return result
-
-    def _create_exponent_pair_idx_map(self) -> dict:
-        """Create dictionary of terms in polynomial that we fit.
-
-        We truncate the fit if e.g. there is only a single frequency value to scan over
-        but the fit is nominally set to order four. We additionally eliminate the
-        constant term that should always be either zero or one.
-        """
-        cutoff_omega_d = min(len(self.model.omega_d_values), self.options.fit_cutoff)
-        cutoff_amp = min(len(self.model.drive_amplitudes), self.options.fit_cutoff)
-        idx_exp_map = [
-            (idx_1, idx_2)
-            for idx_1 in range(cutoff_omega_d)
-            for idx_2 in range(cutoff_amp)
-        ]
-        # Kill constant term, which should always be 1 or 0 depending
-        # on if the component is the same as the state being fit.
-        # Moreover kill any terms depending only on drive frequency, since these
-        # coefficients must be zero as the states have to agree at zero drive strength.
-        for idx in range(cutoff_omega_d):
-            idx_exp_map.remove((idx, 0))
-        weighted_vals = [1.01 * idx_1 + idx_2 for (idx_1, idx_2) in idx_exp_map]
-        sorted_idxs = np.argsort(weighted_vals)
-        sorted_idx_exp_map = {}
-        counter = 0
-        for sorted_idx in sorted_idxs:
-            exponents = idx_exp_map[sorted_idx]
-            if sum(exponents) <= self.options.fit_cutoff:
-                sorted_idx_exp_map[counter] = exponents
-                counter += 1
-        return sorted_idx_exp_map
+        # Generate all combinations of indices. 
+        # Remove amplitude-independent terms (i.e. exponent for the amp, l == 0).
+        # This is enforced by the fact the states have to agree at zero drive strength.
+        idx_exp_map = jnp.stack(jnp.meshgrid(
+                                    jnp.arange(self.fit_cutoff_omega_d), 
+                                    jnp.arange(1, self.fit_cutoff_amp), 
+                                    indexing='ij'), 
+                                axis=-1).reshape(-1, 2)
+        
+        # Sort. Introduce a fudge factor to ensure that the sorting is stable
+        # Only keep terms where the sum of the exponents is less than the cutoff
+        weighted_vals = 1.01 * idx_exp_map[:, 0] + idx_exp_map[:, 1]
+        sorted_idxs = jnp.argsort(weighted_vals[weighted_vals <= 1.01*self.fit_cutoff])
+        return idx_exp_map[sorted_idxs].T # shape = (2,num_fit_terms)
 
 
 class DisplacedStateFit(DisplacedState):
@@ -234,9 +171,9 @@ class DisplacedStateFit(DisplacedState):
     def displaced_states_fit(
         self,
         omega_d_amp_slice: list,
-        ovlp_with_bare_states: np.ndarray,
-        floquet_modes: np.ndarray,
-    ) -> np.ndarray:
+        ovlp_with_bare_states: Array,
+        floquet_modes: Array,
+    ) -> Array:
         """Perform a fit for the indicated range, ignoring specified modes.
 
         We loop over all states in state_indices and perform the fit for a given
@@ -258,91 +195,97 @@ class DisplacedStateFit(DisplacedState):
             Optimized fit coefficients
         """
 
-        def _fit_for_state_idx(array_state_idx: tuple[int, int]) -> np.ndarray:
+        def _fit_for_state_idx(array_state_idx: tuple[int, int]) -> Array:
             array_idx, state_idx = array_state_idx
             floquet_mode_for_state = floquet_modes[:, :, array_idx, :]
-            mask = ovlp_with_bare_states[:, :, array_idx].ravel()
-            # only fit states that we think haven't run into
-            # a nonlinear transition (same for omega_d_amp_filtered above)
-            omega_d_amp_filtered = [
-                omega_d_amp_slice[i]
-                for i in range(len(mask))
-                if np.abs(mask[i]) > self.options.overlap_cutoff
-            ]
-            num_coeffs = len(self.exponent_pair_idx_map)
-            coefficient_matrix_for_amp_and_state = np.zeros(
-                (self.hilbert_dim, num_coeffs), dtype=complex
+            mask = (
+                jnp.abs(ovlp_with_bare_states[:, :, array_idx].ravel())
+                > self.fit_cutoff
             )
-            if len(omega_d_amp_filtered) < len(self.exponent_pair_idx_map):
-                warnings.warn(
-                    "Not enough data points to fit. Returning zeros for the fit",
-                    stacklevel=3,
-                )
-                return coefficient_matrix_for_amp_and_state
-            for state_idx_component in range(self.hilbert_dim):
+
+            # only fit states that we think haven't run into a nonlinear transition
+            omega_d_amp_masked = jnp.where(mask, omega_d_amp_slice, jnp.nan)
+            num_coeffs = len(self.exponent_pair)
+
+
+            def _fit_for_component(state_idx_component):
                 floquet_mode_bare_component = floquet_mode_for_state[
                     :, :, state_idx_component
                 ].ravel()
-                floquet_component_filtered = floquet_mode_bare_component[
-                    np.abs(mask) > self.options.overlap_cutoff
-                ]
-                bare_same = state_idx_component == state_idx
-                bare_component_fit = self._fit_coefficients_for_component(
-                    omega_d_amp_filtered, floquet_component_filtered, bare_same
+                floquet_mode_bare_component_masked = jnp.where(
+                    mask, floquet_mode_bare_component, jnp.nan
                 )
-                coefficient_matrix_for_amp_and_state[state_idx_component, :] = (
-                    bare_component_fit
+                bare_same = (state_idx_component == state_idx)
+                return self._fit_coefficients_for_component(
+                    omega_d_amp_masked, floquet_mode_bare_component_masked, bare_same
                 )
-            return coefficient_matrix_for_amp_and_state
 
-        array_idxs = np.arange(len(self.state_indices))
-        array_state_idxs = zip(array_idxs, self.state_indices, strict=False)
-        fit_data = list(
-            parallel_map(self.options.num_cpus, _fit_for_state_idx, array_state_idxs)
-        )
-        return np.array(fit_data, dtype=complex).reshape(
-            (
-                len(self.state_indices),
-                self.hilbert_dim,
-                len(self._create_exponent_pair_idx_map()),
+            # Return a fitted result only if there are enough states to fit
+            # Otherwise, return zeros 
+            # Note, warnings are not jittable (see: https://github.com/dynamiqs/dynamiqs/pull/925)
+            num_not_nan = jnp.sum(not jnp.isnan(omega_d_amp_masked))
+            return jax.lax.cond(
+                num_not_nan < len(self.exponent_pair),
+                lambda _: jax.vmap(_fit_for_component)(
+                            range(self.hilbert_dim)),   # If success, return the result
+                lambda _: jnp.zeros((self.hilbert_dim, num_coeffs), 
+                                     dtype=complex),    # If failure, return zeros
+                operand=None
             )
-        )
+
+        return jax.vmap(_fit_for_state_idx)(enumerate(self.state_indices))
 
     def _fit_coefficients_for_component(
         self,
-        omega_d_amp_filtered: list,
-        floquet_component_filtered: np.ndarray,
+        omega_d_amp_masked: list,
+        floquet_component_masked: Array,
         bare_same: bool,
-    ) -> np.ndarray:
+    ) -> Array:
         """Fit the floquet modes to an "ideal" displaced state based on a polynomial.
 
         This is done here over the grid specified by omega_d_amp_slice. We ignore
         floquet mode data indicated by mask, where we suspect by looking at overlaps
         with the bare state that we have hit a resonance.
         """
-        p0 = np.zeros(len(self.exponent_pair_idx_map))
+        p0 = jnp.zeros(len(self.exponent_pair))
         # fit the real and imaginary parts of the overlap separately
         popt_r = self._fit_coefficients_factory(
-            omega_d_amp_filtered, np.real(floquet_component_filtered), p0, bare_same
+            omega_d_amp_masked, jnp.real(floquet_component_masked), p0, bare_same
         )
         popt_i = self._fit_coefficients_factory(
-            omega_d_amp_filtered,
-            np.imag(floquet_component_filtered),
+            omega_d_amp_masked,
+            jnp.imag(floquet_component_masked),
             p0,
             False,  # for the imaginary part, constant term should always be zero
         )
         return popt_r + 1j * popt_i
 
     def _fit_coefficients_factory(
-        self, XYdata: list, Zdata: np.ndarray, p0: tuple | np.ndarray, bare_same: bool
-    ) -> np.ndarray:
-        poly_fit = functools.partial(self._coefficient_for_state, bare_same=bare_same)
-        try:
-            popt, _ = sp.optimize.curve_fit(poly_fit, XYdata, Zdata, p0=p0)
-        except RuntimeError:
-            warnings.warn(
-                "fit failed for a bare component, returning zeros for the fit",
-                stacklevel=3,
-            )
-            popt = np.zeros(len(p0))
-        return popt
+        self, 
+        xy_data: list, 
+        z_data: Array, 
+        p0: tuple | Array, 
+        bare_same: bool,
+    ) -> Array:
+    
+        def _residuals(_p0):
+            coefficient_fun = jtu.Partial(self._compute_polynomial, *_p0, bare_same=bare_same)
+            pred_z_data = jax.vmap(coefficient_fun)(xy_data)
+            return jnp.nansum(jnp.abs(z_data - pred_z_data) ** 2)
+
+        # TODO solver to use here? LM?
+        # solver = optx.LevenbergMarquardt(rtol=1e-8, atol=1e-8)
+        solver = optx.BFGS(rtol=1e-8, atol=1e-8)
+        opt_result = optx.minimise(_residuals, solver, p0)
+
+        success = jnp.isfinite(opt_result.params).all()
+
+        # Note, warnings are not jittable (see: https://github.com/dynamiqs/dynamiqs/pull/925)
+        opt_result_with_fallback = jax.lax.cond(
+            success,
+            lambda _: opt_result.params,  # If success, return the result
+            lambda _: jnp.zeros(len(p0)),  # If failure, return zeros
+            operand=None
+        )
+
+        return opt_result_with_fallback
