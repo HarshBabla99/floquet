@@ -7,7 +7,7 @@ import re
 
 import h5py
 import numpy as np
-import qutip as qt
+from dynamiqs import QArray
 
 
 class Serializable:
@@ -57,8 +57,8 @@ class Serializable:
                         _val.__class__.__module__,
                     )
                 }
-            elif isinstance(_val, qt.Qobj):
-                initdata[_key] = _val.data.to_array()
+            elif isinstance(_val, QArray):
+                initdata[_key] = _val.to_numpy()
             else:
                 initdata[_key] = _val
         return initdata
