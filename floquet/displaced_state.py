@@ -49,7 +49,7 @@ class DisplacedState:
     def displaced_states(
         self, 
         omega_ds: Float[ArrayLike, 'num_omega_ds'],,
-        amps: Float[ArrayLike, 'num_amps'],
+        amps: Float[ArrayLike, 'num_omega_ds num_amps'],
         state_indices: int | List[int],
         coefficients: Float[Array, 'num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms'],
     ) -> dq.QArray:
@@ -67,7 +67,7 @@ class DisplacedState:
 
         Parameters:
             omega_ds: Drive frequency. Shape: (num_omega_ds,)
-            amps: Drive amplitude. Shape: (num_amps,)
+            amps: Drive amplitude. Shape: (num_omega_ds, num_amps)
             state_indices: Indices of the states, $\left| \tilde{i}(\omega_d, \xi) \right>$ that we are interested in.
             coefficients: Coefficients to expand the displaced state in terms of the undriven states. Shape: (num_state_indices, hilbert_dim, num_omega_ds, num_amps, num_fit_terms).
 
@@ -93,7 +93,7 @@ class DisplacedState:
     @jit
     def _compute_polynomial(
         omega_ds: Float[ArrayLike, 'num_omega_ds'],
-        amps: Float[ArrayLike, 'num_amps'],
+        amps: Float[ArrayLike, 'num_omega_ds num_amps'],
         coefficients: Float[Array, '... num_omega_ds num_amps num_fit_terms'],
         exponent_pair: Int[Array, '2 num_fit_terms'],
         bare_same: Bool[ArrayLike, '...'],
@@ -106,7 +106,7 @@ class DisplacedState:
 
         Parameters:
             omega_d: Drive frequency. Shape: (num_omega_ds,)
-            amp: Drive amplitude. Shape: (num_amps,)
+            amp: Frequency-dependant drive amplitudes. Shape: (num_omega_ds, num_amps)
             coefficients: Coefficients to be fitted, i.e., $C_{k,l}(\omega_d, \xi)$. Shape: (..., num_omega_ds, num_amps, num_fit_terms)
             bare_same: Boolean indicating if the state is the same as the bare state. If yes, return 1 + result, else return result. Shape: (...,)
 
@@ -121,9 +121,9 @@ class DisplacedState:
 
         # Cartesian vmap (vmap in reverse order)
         _cvmap_poly_term = vmap(vmap(vmap(_poly_term,
-               in_axes=(None,None,-1), out_axes=0), # vmap over exponents, shape: (2, num_fit_terms)
-               in_axes=(None,-1,None), out_axes=0), # vmap over amp      , shape: (num_amps,)
-               in_axes=(-1,None,None), out_axes=0)  # vmap over omega_d  , shape: (num_omega_d,)
+               in_axes=(None,None,-1), out_axes=0), # vmap over exponents
+               in_axes=(None,-1,None), out_axes=0), # vmap over amp  
+               in_axes=(-1,-2,None),   out_axes=0)  # vmap over omega_d
 
         # Get all the terms i.e. omega_d^k * amp^l, shape: (num_omega_ds, num_amps, num_fit_terms)
         all_ploy_terms = _cvmap_poly_term(omega_ds, amps, exponent_pair)
