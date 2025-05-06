@@ -7,6 +7,7 @@ import re
 
 import h5py
 import numpy as np
+import jax.numpy as jnp
 from dynamiqs import QArray
 
 
@@ -26,6 +27,8 @@ class Serializable:
             other_val = getattr(other, key)
             if isinstance(self_val, np.ndarray):
                 equal = equal and np.allclose(self_val, other_val)
+            elif isinstance(self_val, jnp.Array):
+                equal = equal and jnp.allclose(self_val, other_val)
             else:
                 equal = equal and self_val == other_val
         return equal
