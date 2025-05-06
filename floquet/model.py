@@ -28,10 +28,11 @@ class Model(Serializable):
     ## Batching simulations
     If you wish to vary a Hamiltonian parameter, such as the gate-charge or flux-bias, you can batch the Hamiltonians and simulate the Floquet modes for all Hamiltonians concurrently. Importantly, we currently only support batching over parameters within static Hamiltonian. This is because dynamiqs does not allow modulated TimeQArrays to be batched.
     """
-    H0 : QArray
-    H1 : QArray
+    H0 : Complex[QArray, "hilbert_dim hilbert_dim"]
+    H1 : Complex[QArray, "hilbert_dim hilbert_dim"]
     omega_d_values : Float[Array, "num_amps num_omega_ds"]
     drive_amplitudes : Float[Array, "num_amps"]
+    hilbert_dim : Float
 
     def __init__(
         self,
@@ -63,6 +64,7 @@ class Model(Serializable):
        
         self.H0 = H0
         self.H1 = H1
+        self.hilbert_dim = H0.shape[-1]
         self.omega_d_values = omega_d_values
         self.drive_amplitudes = drive_amplitudes
 
