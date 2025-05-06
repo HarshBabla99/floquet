@@ -1,20 +1,17 @@
 from __future__ import annotations
 
-import jax
-from jax import Array
+from jax import Array, vmap, jit
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import jax.lax.cond as jcond
+
 import dynamiqs as dq
+from dynamiqs import QArray
 
 from optimistix import LevenbergMarquardt, least_squares, RESULTS
 
-from jax import vmap, jit
-
-from jaxtyping import ArrayLike, Int, Float, Bool, Complex
+from jaxtyping import Int, Float, Bool, Complex
 from typing import List
-from dynamiqs import QArray
-
-from warnings import warn
 
 from .model import Model
 from .options import Options
@@ -25,8 +22,7 @@ class DisplacedState:
 
     Parameters:
         hilbert_dim: Hilbert space dimension
-        model: Model including the Hamiltonian, drive amplitudes, frequencies,
-            state indices
+        model: Model including the Hamiltonian, drive amplitudes, frequencies, state indices
         state_indices: States of interest
         options: Options used
     """
@@ -60,8 +56,8 @@ class DisplacedState:
         omega_ds: Float[Array, "num_omega_ds"],
         amps: Float[Array, "num_omega_ds num_amps"],
         coefficients: Complex[Array, "num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms"],
-        state_indices: Int, 
         *,
+        state_indices: List[int] = None, 
         bare_same_override: Bool = False,
     ) -> Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"]:
         """Construct approximate displaced states, $\left| \tilde{i}(\omega_d, \xi) \right>$.
@@ -80,11 +76,14 @@ class DisplacedState:
             omega_ds: Drive frequency. Shape: (num_omega_ds,)
             amps: Drive amplitude. Shape: (num_omega_ds, num_amps)
             coefficients: Coefficients to expand the displaced state in terms of the undriven states. Shape: (num_state_indices, hilbert_dim, num_omega_ds, num_amps, num_fit_terms).
+            state_indices: States of interest. 
             bare_same_override: Override flag for bare_same. Equivalent to excluding a constant term in the fit or not. Keyword-only argument. 
 
         Returns:
             The displaced state(s). Shape: (num_state_indices, num_omega_ds, num_amps, hilbert_dim, 1). Careful, that the first index is the array index, not the state index! For example, if state_indices = [0, 2], then result[0, ...] is the displaced state for state index 0, and result[1, ...] is the displaced state for state index 2.
         """
+        if state_indices is None:
+            state_indices = self.state_indices
 
         _vmap_displaced_state = vmap(DisplacedState._one_displaced_state, 
                                     in_axes=(None, None, -5, -1, None, None), out_axes=0)
@@ -107,7 +106,7 @@ class DisplacedState:
         # Set vec_bare_same based on bare_same_override
         # If bare_same_override is false, return a vector of all False
         # If it is true, then return a boolean vector with True only when idx == state_idx
-        vec_bare_same = jax.lax.cond(
+        vec_bare_same = jcond(
             bare_same_override,
             lambda: jnp.zeros(hilbert_dim, dtype=bool),
             lambda: (dq.fock(hilbert_dim, state_idx).to_jax() == 1)[..., 0]
@@ -127,15 +126,14 @@ class DisplacedState:
     @staticmethod
     @jit
     def _compute_polynomial(
-        omega_ds: Float[ArrayLike, "num_omega_ds"],
-        amps: Float[ArrayLike, "num_omega_ds num_amps"],
-        coefficients: Float[Array, "... num_omega_ds num_amps num_fit_terms"],
+        omega_ds: Float[Array, "num_omega_ds"],
+        amps: Float[Array, "num_omega_ds num_amps"],
+        coefficients: Complex[Array, "num_omega_ds num_amps num_fit_terms"],
         exponent_pair: Int[Array, "2 num_fit_terms"],
-        bare_same: Bool[ArrayLike, "..."],
-    ) -> Complex[Array, "... num_omega_ds num_amps"]:
+        bare_same: Bool,
+    ) -> Complex[Array, "num_omega_ds num_amps"]:
         # Helper function to compute one term of the polynomial
-        def _poly_term(omega_d: ArrayLike, amp: ArrayLike, exponent_pair: ArrayLike,
-                       ) -> ArrayLike:
+        def _poly_term(omega_d: Float, amp: Float, exponent_pair: Float) -> Float:
             return (omega_d ** exponent_pair[0]) * (amp ** exponent_pair[1])
 
         # Cartesian vmap (vmap in reverse order)
@@ -150,7 +148,7 @@ class DisplacedState:
         # NOTE: coefficients.shape=(num_omega_ds, num_amps, num_fit_terms).
         # This isn't explicitly validated. 
         result = jnp.nansum(coefficients * all_ploy_terms, axis = -1)
-        return jax.lax.cond(bare_same, lambda: 1.0 + result, lambda: result)
+        return jcond(bare_same, lambda: 1.0 + result, lambda: result)
 
 
     def _create_exponent_pair(self) -> dict:
@@ -191,8 +189,8 @@ class DisplacedStateFit(DisplacedState):
         self,
         omega_ds: Float[Array, 'num_omega_ds'],
         amps: Float[Array, 'num_omega_ds num_amps'],
-        floquet_modes: Float[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"],
-    ) -> Float[Array, "num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms"]:
+        floquet_modes: Complex[QArray, "num_state_indices num_omega_ds num_amps hilbert_dim 1"],
+    ) -> Complex[Array, "num_state_indices hilbert_dim num_omega_ds num_amps num_fit_terms"]:
         """Fit the coefficients for the displaced states corresponding to self.state_indices. 
         
         We ignore the floquet modes where we suspect a transition. These are the points where the overlap of the floquet mode with the bare states falls below the threshold (specified in options).
@@ -211,7 +209,7 @@ class DisplacedStateFit(DisplacedState):
                                  floquet_modes.shape[-4],    # num_omega_ds
                                  floquet_modes.shape[-3],    # num_amps
                                  num_fit_terms,              # num_fit_terms
-                               ))
+                               ), dtype=complex)
 
         # Do we have enough points to fit? 
         # This isn't JAX-friendly. However, ideally this function is run just once. 
@@ -298,7 +296,7 @@ class DisplacedStateFit(DisplacedState):
 
         # Return the fitted result if successful. Otherwise, return zeros 
         # Note, warnings are not jittable (see: https://github.com/dynamiqs/dynamiqs/pull/925)
-        return jax.lax.cond(
+        return jcond(
             solution.result == RESULTS.successful,
             lambda: solution.value,
             lambda: jnp.zeros_like(init_coefficients),
