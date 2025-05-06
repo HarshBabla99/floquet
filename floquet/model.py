@@ -28,8 +28,8 @@ class Model(Serializable):
     ## Batching simulations
     If you wish to vary a Hamiltonian parameter, such as the gate-charge or flux-bias, you can batch the Hamiltonians and simulate the Floquet modes for all Hamiltonians concurrently. Importantly, we currently only support batching over parameters within static Hamiltonian. This is because dynamiqs does not allow modulated TimeQArrays to be batched.
     """
-    H0 : Complex[QArray, "hilbert_dim hilbert_dim"]
-    H1 : Complex[QArray, "hilbert_dim hilbert_dim"]
+    H0 : Complex[QArray, "... hilbert_dim hilbert_dim"]
+    H1 : Complex[QArray, "... hilbert_dim hilbert_dim"]
     omega_d_values : Float[Array, "num_amps num_omega_ds"]
     drive_amplitudes : Float[Array, "num_amps"]
     hilbert_dim : Float
@@ -99,7 +99,7 @@ class Model(Serializable):
         """Return the Hamiltonian, Cartesian vectorization over omega_d and amplitude. The method correctly maps over the 2D drive_amplitudes array, accounting for the freq. dependance. 
 
         Returns:
-            vectorized_hamiltonian: Shape: (num_omega_ds, num_amps, hilbert_dim, hilbert_dim)
+            vectorized_hamiltonian: Shape: (..., num_omega_ds, num_amps, hilbert_dim, hilbert_dim)
         """
         if omega_ds is None:
             omega_ds = self.omega_d_values
@@ -108,6 +108,6 @@ class Model(Serializable):
 
         # vmap over omega_d and corresponding amplitudes
         _vmap_hamiltonian = vmap(vmap(self.hamiltonian,
-                                 in_axes=(None, -1), out_axes=0), # vmap over amps
-                                 in_axes=(-1, -2)  , out_axes=0)  # vmap over omega_ds
+                                 in_axes=(None, -1), out_axes=-3), # vmap over amps
+                                 in_axes=(-1, -2)  , out_axes=-4)  # vmap over omega_ds
         return _vmap_hamiltonian(omega_ds, amps)
