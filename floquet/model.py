@@ -68,11 +68,13 @@ class Model(Serializable):
         self.omega_d_values = omega_d_values
         self.drive_amplitudes = drive_amplitudes
 
-    def omega_d_to_idx(self, omega_d: float) -> Array:
+    def omega_d_to_idx(self, omega_d: float,
+        ) -> Float[Array, "num_omega_ds"]:
         """Return index corresponding to omega_d value."""
         return jnp.argmin(jnp.abs(self.omega_d_values - omega_d))
 
-    def amp_to_idx(self, amp: float, omega_d: float) -> Array:
+    def amp_to_idx(self, amp: float, omega_d: float,
+        ) -> Float[Array, "num_omega_ds num_amps"]:
         """Return index corresponding to amplitude value.
 
         Because the drive amplitude can depend on the drive frequency, we also must pass
@@ -81,19 +83,31 @@ class Model(Serializable):
         omega_d_idx = self.omega_d_to_idx(omega_d)
         return jnp.argmin(jnp.abs(self.drive_amplitudes[:, omega_d_idx] - amp))
 
-    def hamiltonian(self, omega_d : float, amp : float) -> TimeQArray:
+    def hamiltonian(
+        self, 
+        omega_d : float, 
+        amp : float,
+        ) -> Complex[TimeQArray, "hilbert_dim hilbert_dim"]:
         """Return the Hamiltonian we actually simulate."""
         return dq.constant(self.H0) + dq.modulated(lambda t: jnp.cos(omega_d * t), amp * self.H1)
 
-    def vectorized_hamiltonian(self) -> TimeQArray:
+    def vectorized_hamiltonian(
+        self, 
+        omega_ds : Float[Array, "num_omega_ds"] = None,
+        amps : Float[Array, "num_omega_ds num_amps"] = None,
+        ) -> Complex[TimeQArray, "num_omega_ds num_amps hilbert_dim hilbert_dim"]:
         """Return the Hamiltonian, Cartesian vectorization over omega_d and amplitude. The method correctly maps over the 2D drive_amplitudes array, accounting for the freq. dependance. 
 
         Returns:
             vectorized_hamiltonian: Shape: (num_omega_ds, num_amps, hilbert_dim, hilbert_dim)
         """
+        if omega_ds is None:
+            omega_ds = self.omega_d_values
+        if amps is None:
+            amps = self.drive_amplitudes
+
         # vmap over omega_d and corresponding amplitudes
-        _vmap_hamiltonian = vmap(vmap(hamiltonian,
+        _vmap_hamiltonian = vmap(vmap(self.hamiltonian,
                                  in_axes=(None, -1), out_axes=0), # vmap over amps
                                  in_axes=(-1, -2)  , out_axes=0)  # vmap over omega_ds
-
-        return _vmap_hamiltonian(self.omega_d_values, self.drive_amplitudes)
+        return _vmap_hamiltonian(omega_ds, amps)
