@@ -15,6 +15,16 @@ Requires Python 3.10+
 
 Documentation is available at [https://dkweiss.net/floquet/](https://dkweiss.net/floquet/)
 
+## Development
+
+To run the test suite locally, install the project in editable mode so that
+`importlib.metadata` can discover the package metadata expected by the tests:
+
+```bash
+pip install -e .[dev]
+pytest
+```
+
 ## Example
 
 Before jumping straight into the Floquet analysis, we first need to define our system Hamiltonian and the drive parameters. Here we take the example of a transmon and utilize the scubits library to help define the system Hamiltonian. Note however that the code accepts QuTiP `Qobj` as input for the Hamiltonian. 

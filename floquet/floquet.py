@@ -143,13 +143,12 @@ class FloquetAnalysis(Serializable):
         overlaps = np.einsum("ij,jk->ik", ideal_displaced_state_array, f_modes_cols)
         # take the argmax along k
         f_idxs = np.argmax(np.abs(overlaps), axis=1)
-        for array_idx, _state_idx in enumerate(self.state_indices):
-            f_idx = f_idxs[array_idx]
-            bare_state_overlap = overlaps[array_idx, f_idx]
-            ovlps_and_modes[array_idx, 0] = bare_state_overlap
-            ovlps_and_modes[array_idx, 1:] = (
-                np.sign(bare_state_overlap) * f_modes_cols[:, f_idx]
-            )
+        bare_state_overlaps = overlaps[np.arange(len(self.state_indices)), f_idxs]
+        ovlps_and_modes[:, 0] = bare_state_overlaps
+        selected_modes = f_modes_cols[:, f_idxs].T
+        ovlps_and_modes[:, 1:] = (
+            np.sign(bare_state_overlaps)[:, None] * selected_modes
+        )
         return ovlps_and_modes
 
     def bare_state_array(self) -> np.ndarray:
