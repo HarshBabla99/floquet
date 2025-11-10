@@ -61,36 +61,42 @@ class DisplacedState:
                 a is the number of drive amplitudes (specified by amp_idxs) and s is the
                 number of states we are investigating
         """
-        overlaps = np.zeros(floquet_modes.shape[:-1])
-        for array_idx, state_idx in enumerate(self.state_indices):
-            # Bind the array_idx variable to the function to prevent late-binding
-            # closure, see https://docs.python-guide.org/writing/gotchas/#late-binding-closures.
-            # This isn't actually a problem in our case but still nice practice to
-            # bind the value to the function
-            def _compute_bare_state(
-                omega_d: float, _array_idx: int = array_idx, _state_idx: int = state_idx
-            ) -> np.ndarray:
-                omega_d_idx = self.model.omega_d_to_idx(omega_d)
-                return self.displaced_state(
-                    omega_d,
-                    self.model.drive_amplitudes[amp_idx_0, omega_d_idx],
-                    _state_idx,
-                    coefficients=coefficients[_array_idx],
-                ).full()[:, 0]
+        omega_d_vals = self.model.omega_d_values
+        drive_amplitudes = self.model.drive_amplitudes[amp_idx_0]
 
-            bare_states = np.array(
-                [_compute_bare_state(omega_d) for omega_d in self.model.omega_d_values],
+        def _bare_states_for_idx(array_idx: int, state_idx: int) -> np.ndarray:
+            return np.array(
+                [
+                    self.displaced_state(
+                        omega_d,
+                        drive_amplitudes[omega_idx],
+                        state_idx,
+                        coefficients=coefficients[array_idx],
+                    ).full()[:, 0]
+                    for omega_idx, omega_d in enumerate(omega_d_vals)
+                ],
                 dtype=complex,
             )
-            # bare states may differ as a function of omega_d, hence the bare states
-            # have an index of i that we don't sum over
-            # indices are i: omega_d, j: amp, k: components of state
-            overlaps[:, :, array_idx] = np.abs(
-                np.einsum(
-                    "ijk,ik->ij", floquet_modes[:, :, array_idx], np.conj(bare_states)
-                )
+
+        bare_states = np.array(
+            [
+                _bare_states_for_idx(array_idx, state_idx)
+                for array_idx, state_idx in enumerate(self.state_indices)
+            ],
+            dtype=complex,
+        )
+        # Vectorized across states to reduce Python-level looping while preserving
+        # the original overlap calculation semantics.
+        floquet_modes_states_first = np.moveaxis(floquet_modes, 2, 0)
+        overlaps = np.abs(
+            np.einsum(
+                "soah,soh->soa",
+                floquet_modes_states_first,
+                np.conj(bare_states),
+                optimize=True,
             )
-        return overlaps
+        )
+        return np.transpose(overlaps, (1, 2, 0))
 
     def overlap_with_displaced_states(
         self, amp_idxs: list, coefficients: np.ndarray, floquet_modes: np.ndarray
@@ -113,24 +119,27 @@ class DisplacedState:
         """
 
         def _run_overlap_displaced(omega_d_amp: tuple[float, float]) -> np.ndarray:
-            overlap = np.zeros(len(self.state_indices))
             omega_d, amp = omega_d_amp
-            for array_idx, state_idx in enumerate(self.state_indices):
-                floquet_mode_for_idx = floquet_modes[
-                    self.model.omega_d_to_idx(omega_d),
-                    self.model.amp_to_idx(amp, omega_d),
-                    array_idx,
-                ]
-                disp_state = self.displaced_state(
-                    omega_d,
-                    amp,
-                    state_idx=state_idx,
-                    coefficients=coefficients[array_idx],
-                ).dag()
-                overlap[array_idx] = np.abs(
-                    disp_state.data.to_array()[0] @ floquet_mode_for_idx
-                )
-            return overlap
+            omega_d_idx = self.model.omega_d_to_idx(omega_d)
+            amp_idx = self.model.amp_to_idx(amp, omega_d)
+            floquet_slice = floquet_modes[omega_d_idx, amp_idx]
+            displaced_states = np.array(
+                [
+                    self.displaced_state(
+                        omega_d,
+                        amp,
+                        state_idx=state_idx,
+                        coefficients=coefficients[array_idx],
+                    )
+                    .dag()
+                    .data.to_array()[0]
+                    for array_idx, state_idx in enumerate(self.state_indices)
+                ],
+                dtype=complex,
+            )
+            return np.abs(
+                np.einsum("ij,ij->i", displaced_states, floquet_slice, optimize=True)
+            )
 
         omega_d_amp_params = self.model.omega_d_amp_params(amp_idxs)
         amp_range_vals = self.model.drive_amplitudes[amp_idxs[0] : amp_idxs[1]]
