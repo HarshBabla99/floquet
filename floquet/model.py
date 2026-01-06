@@ -82,3 +82,11 @@ class Model(Serializable):
         """Return the Hamiltonian we actually simulate."""
         omega_d, amp = omega_d_amp
         return qt.QobjEvo([self.H0, [amp * self.H1, lambda t: np.cos(omega_d * t)]])
+
+    def bare_state_array(self) -> np.ndarray:
+        """Return array of true bare states.
+
+        Used to specify initial bare states and to compute average excitation 
+        number for the Blais branch analysis.
+        """
+        return np.identity(self.H0.shape[-1])

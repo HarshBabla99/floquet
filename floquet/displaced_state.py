@@ -123,9 +123,6 @@ class DisplacedState:
             0, and result[1, ...] is the displaced state for state index 2.
         """
 
-        # Compute polynomial term omega^{k_0} * amp^{k_1} for all (omega, amp, fit_terms).
-        # Hence, poly_terms.shape: (num_omega_ds, num_amps, num_fit_terms)
-        # TODO: Add an option to precompute the poly_terms tensor once and store it to save time.
         # TODO: Only select a few amps and omega_ds (i.e. mask using model.omega_d_to_idx). 
         # Currently these are ignored
         if omega_ds is not None or amps is not None:
@@ -134,10 +131,18 @@ class DisplacedState:
                 stacklevel=3,
             )
 
+        # Compute polynomial term omega^{k_0} * amp^{k_1} for all (omega, amp, fit_terms).
+        # Hence, poly_terms.shape: (num_omega_ds, num_amps, num_fit_terms)
+        # TODO: Add an option to recompute poly_terms everytime.
         result = np.einsum('wat,sht->wash', self.poly_terms, coefficients)
 
-        # Add the perturbation to the bare state
-        result[... , np.arange(len(state_indices)), state_indices] += 1.0
+        # Add the perturbation to the bare state. Bare states are defined by the model.
+        # Get only the states corresponding to state_indices, and tile them for all 
+        # omega_ds and amps. 
+        result += np.tile(
+            self.model.bare_state_array()[None, None, state_indices, :],
+            (*perturbation.shape[:2], 1, 1),
+        )
         
         # Normalize
         result /= np.linalg.norm(result, axis=-1, keepdims=True)
@@ -265,9 +270,11 @@ class DisplacedStateFit(DisplacedState):
         masked_poly_terms = self.poly_terms.reshape(-1, num_fit_terms)[mask_flat]
         masked_target_states = target_states.reshape(-1, self.hilbert_dim)[mask_flat]
 
-        # Bare states array (1. for all amp-freq pairs, at the state_idx component)
-        masked_bare_states = np.zeros_like(masked_target_states, dtype=float)
-        masked_bare_states[:, state_index] = 1.0
+        # Bare states array (repeated for all amp-freq pairs)
+        masked_bare_states = np.tile(
+            self.model.bare_state_array()[None, state_index, :],
+            (*masked_target_states.shape[0], 1),
+        )
 
         # Fit the difference between the target states and the bare states
         masked_states_to_fit = masked_target_states - masked_bare_states
