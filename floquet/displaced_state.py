@@ -31,8 +31,11 @@ class DisplacedState:
         self.exponent_pairs = self._create_exponent_pairs()
         self.poly_terms = self._create_poly_terms()
 
-    def overlap_with_bare_states(
-        self, amp_idx_0: int, coefficients: np.ndarray, floquet_modes: np.ndarray
+    def overlap_with_bare_states(self, 
+        coefficients: np.ndarray, 
+        floquet_modes: np.ndarray,
+        omega_d_idxs : tuple[int, int] = (0, None),
+        amp_idx_0: int = 0, 
     ) -> np.ndarray:
         """Calculate overlap of floquet modes with 'bare' states.
 
@@ -49,57 +52,69 @@ class DisplacedState:
         own peril.
 
         Parameters:
-            amp_idx_0: Index specifying the lower bound of the amplitude range.
             coefficients: coefficients that specify the bare state that we calculate
                 overlaps of Floquet modes against. 
                 Shape: (num_states, hilbert_dim, num_fit_terms).
             floquet_modes: Floquet modes to be compared to the bare states given by
                 coefficients. 
                 Shape: (num_omega_d, num_amps, num_states, hilbert_dim).
+            omega_d_idxs : Indices specifying the lower and upper bound of the drive 
+                frequency range. Selects all `self.model.omega_d_values` by default.
+            amp_idx_0: Index specifying the lower bound of the amplitude range. 
+                0 by default, i.e. selects the undriven states. 
         Returns:
             Overlaps. Shape: (num_omega_d, num_amps, num_states).
         """
-        floquet_modes = floquet_modes[:, amp_idxs[0]:amp_idxs[1], self.state_indices, :]
+        floquet_modes = floquet_modes[
+            omega_d_idxs[0] : omega_d_idxs[1], 
+            :, 
+            np.arange(self.state_indices),
+            :
+        ]
         displaced_states = self.displaced_state(
-            self.model.omega_d_values,
-            self.model.drive_amplitudes[amp_idx_0:amp_idx_0 + 1],
-            self.state_indices,
-            coefficients,
+            coefficients, 
+            omega_d_idxs, 
+            [amp_idx_0, amp_idx_0+1]
         )[:,0,...]
-        return np.abs(np.einsum('wash,wsh->was', np.conj(displaced_states), floquet_modes))
+        return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
 
-    def overlap_with_displaced_states(
-        self, amp_idxs: list, coefficients: np.ndarray, floquet_modes: np.ndarray
+    def overlap_with_displaced_states(self, 
+        coefficients: np.ndarray, 
+        floquet_modes: np.ndarray,
+        omega_d_idxs : tuple[int, int] = (0, None),
+        amp_idxs: tuple[int, int] = (0, None), 
     ) -> np.ndarray:
         """Calculate overlap of floquet modes with 'ideal' displaced states.
 
         This is done here for a specific amplitude range.
 
         Parameters:
-            amp_idxs: Index specifying the lower and upper bound of the amplitude range.
             coefficients: coefficients that specify the displaced state that we calculate
                 overlaps of Floquet modes against. 
                 Shape: (num_states, hilbert_dim, num_fit_terms).
             floquet_modes: Floquet modes to be compared to the bare states given by
                 coefficients. 
                 Shape: (num_omega_ds, num_amps, num_states, hilbert_dim).
+            omega_d_idxs : Indices specifying the lower and upper bound of the drive 
+                frequency range. Selects all `self.model.omega_d_values` by default.
+            amp_idxs: Indices specifying the lower and upper bound of the amplitude range. 
+                Selects all self.model.drive_amplitudes by default. 
         Returns:
             Overlaps. Shape: (num_omega_ds, num_amps, num_states).
         """
-        floquet_modes = floquet_modes[:, amp_idxs[0]:amp_idxs[1], self.state_indices, :]
-        displaced_states = self.displaced_state(
-            self.model.omega_d_values,
-            self.model.drive_amplitudes[amp_idxs[0]:amp_idxs[1]],
-            self.state_indices,
-            coefficients,
-        )
+        floquet_modes = floquet_modes[
+            omega_d_idxs[0] : omega_d_idxs[1], 
+            amp_idxs[0] : amp_idxs[1], 
+            np.arange(self.state_indices),
+            :
+        ]
+        displaced_states = self.displaced_state(coefficients, omega_d_idxs, amp_idxs)
         return np.abs(np.einsum('wash,wash->was', np.conj(displaced_states), floquet_modes))
 
     def displaced_state(self,
         coefficients: np.ndarray,
-        omega_ds: np.ndarray | None = None,
-        amps: np.ndarray | None = None,
-        state_indices: list[int] | None = None,
+        omega_d_idxs : tuple[int, int] = (0, None),
+        amp_idxs: tuple[int, int] = (0, None), 
     ) -> np.ndarray:
         """Construct the ideal displaced state, $\left| \tilde{n} (\omega_d, \Omega_d) \right>$ based on a low-order perturbation around the corresponding bare state.
         $$
@@ -111,36 +126,35 @@ class DisplacedState:
         in the order specified by `self.exponent_pairs`. 
          
         Parameters:
-            coefficients: Coefficients to expand the displaced state in terms of the undriven states. Shape: (num_states, hilbert_dim, num_fit_terms).
-            omega_ds: Drive frequency. Shape: (num_omega_ds,).
-            amps: Drive amplitude. Shape: (num_omega_ds, num_amps)
-            state_indices: States of interest. Shape: (num_states,).
+            coefficients: Coefficients to expand the displaced state in terms of the undriven 
+                states. Shape: (num_states, hilbert_dim, num_fit_terms).
+            omega_d_idxs : Indices specifying the lower and upper bound of the drive 
+                frequency range. Selects all `self.model.omega_d_values` by default.
+            amp_idxs: Indices specifying the lower and upper bound of the amplitude range. 
+                Selects all self.model.drive_amplitudes by default. 
             
         Returns:
             The displaced state(s). Shape: (num_omega_ds, num_amps, num_states, hilbert_dim).
-            Careful, that the first index is the array index, not the state index! For example,
+            Careful, that the num_states index is the array index, not the state index! For example,
             if state_indices = [0, 2], then result[0, ...] is the displaced state for state index 
             0, and result[1, ...] is the displaced state for state index 2.
         """
+        # Tensor of polynomial terms omega^{k_0} * amp^{k_1}. 
+        # Shape: (num_omega_ds, num_amps, num_fit_terms)
+        _poly_terms = self.poly_terms[
+            omega_d_idxs[0] : omega_d_idxs[1],
+            amp_idxs[0] : amp_idxs[1],
+            :
+        ]
 
-        # TODO: Only select a few amps and omega_ds (i.e. mask using model.omega_d_to_idx). 
-        # Currently these are ignored
-        if omega_ds is not None or amps is not None:
-            warnings.warn(
-                "The omega_ds and amps arguments are ignored. Displaced states are only computed for the omega_ds and amplitudes specified at construction.",
-                stacklevel=3,
-            )
-
-        # Compute polynomial term omega^{k_0} * amp^{k_1} for all (omega, amp, fit_terms).
-        # Hence, poly_terms.shape: (num_omega_ds, num_amps, num_fit_terms)
-        # TODO: Add an option to recompute poly_terms everytime.
-        result = np.einsum('wat,sht->wash', self.poly_terms, coefficients)
+        # Compute the perturbation, based on the given coefficients.
+        result = np.einsum('wat,sht->wash', _poly_terms, coefficients)
 
         # Add the perturbation to the bare state. Bare states are defined by the model.
         # Get only the states corresponding to state_indices, and tile them for all 
         # omega_ds and amps. 
         result += np.tile(
-            self.model.bare_state_array()[None, None, state_indices, :],
+            self.model.bare_state_array()[None, None, self.state_indices, :],
             (*perturbation.shape[:2], 1, 1),
         )
         
@@ -150,6 +164,9 @@ class DisplacedState:
         return result
 
     def _create_poly_terms(self) -> np.ndarray:
+        """Compute a tensor, where each component is a polynomial term
+        omega^{k_0} * amp^{k_1} for all (omega, amp, fit_terms). 
+        """
         omega_power = self.model.omega_d_values[:, None, None] ** self.exponent_pairs[0][None, None, :]
         amp_power = self.model.drive_amplitudes.T[:, :, None] ** self.exponent_pairs[1][None, None, :]
         return omega_power * amp_power
@@ -190,9 +207,8 @@ class DisplacedStateFit(DisplacedState):
         self,
         ovlp_with_bare_states: np.ndarray,
         floquet_modes: np.ndarray,
-        omega_ds: np.ndarray | None = None,
-        amps: np.ndarray | None = None,
-        state_indices: list[int] | None = None,
+        omega_d_idxs : tuple[int, int] = (0, None),
+        amp_idxs: tuple[int, int] = (0, None), 
     ) -> np.ndarray:
         """Perform a fit for the indicated range, ignoring specified modes.
 
@@ -206,37 +222,33 @@ class DisplacedStateFit(DisplacedState):
                 Shape: (num_omega_d, num_amps, num_states).
             floquet_modes: Floquet modes. 
                 Shape: (num_omega_ds, num_amps, num_states, hilbert_dim).
-            omega_ds: Drive frequency. Shape: (num_omega_ds,).
-            amps: Drive amplitude. Shape: (num_omega_ds, num_amps).
+            omega_d_idxs : Indices specifying the lower and upper bound of the drive 
+                frequency range. Selects all `self.model.omega_d_values` by default.
+            amp_idxs: Indices specifying the lower and upper bound of the amplitude range. 
+                Selects all self.model.drive_amplitudes by default. 
             
         Returns:
             Optimized fit coefficients. Shape: (num_states, hilbert_dim, num_fit_terms).
         """
-        # TODO: currently the given omega_ds, amps are ignored. 
-        # Use model.omega_d_to_idx and model.amp_to_idx
-        # to adjust the mask. 
-        # Allow for default value = None (this just uses all freqs and amps)
-        if omega_ds is not None or amps is not None:
-            warnings.warn(
-                "The omega_ds and amps arguments are ignored. Displaced states are only computed for the omega_ds and amplitudes specified at construction.",
-                stacklevel=3,
-            )
 
-        if state_indices is None:
-            state_indices = self.state_indices
-
-        # Only fit states that we think haven't run into a transition
-        # mask.shape =(num_omega_ds, num_amps, num_state_indices).
-        mask = (ovlp_with_bare_states > self.options.overlap_cutoff)
+        # Only fit states that we think haven't run into a transition,
+        # and those within the specified bounds
+        # mask.shape = (num_omega_ds, num_amps, num_state_indices).
+        mask = np.zeros_like(ovlp_with_bare_states, dtype=bool)
+        mask[
+            omega_d_idxs[0] : omega_d_idxs[1],
+            amp_idxs[0] : amp_idxs[1]
+        ] = True
+        mask &= (ovlp_with_bare_states > self.options.overlap_cutoff)
 
         coeffs = np.zeros((
-                        len(state_indices),
+                        len(self.state_indices),
                         self.hilbert_dim,
                         self.exponent_pairs.shape[-1]
                       ), dtype=complex)
 
         # Fit each state (TODO: does it help to multiprocess this?)
-        for arr_idx, state_idx in enumerate(state_indices):
+        for arr_idx, state_idx in enumerate(self.state_indices):
             coeffs[arr_idx] = self._fit_for_state_idx(
                                     target_states=np.real(floquet_modes[..., state_idx, :]),
                                     mask=mask[..., state_idx],
