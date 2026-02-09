@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import functools
 import warnings
-
 import numpy as np
 
 from .model import Model
@@ -88,9 +86,9 @@ class DisplacedState:
         )[:,0,...]
 
         if cartesian_overlaps:
-            return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
-        else:
             return np.abs(np.einsum('wth,wash->wats', np.conj(displaced_states), floquet_modes))
+        else:
+            return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
 
     def overlap_with_displaced_states(self, 
         coefficients: np.ndarray, 
@@ -299,7 +297,7 @@ class DisplacedStateFit(DisplacedState):
         # Bare states array (repeated for all amp-freq pairs)
         masked_bare_states = np.tile(
             self.model.bare_state_array()[None, state_index, :],
-            (*masked_target_states.shape[0], 1),
+            (masked_target_states.shape[0], 1),
         )
 
         # Fit the difference between the target states and the bare states
