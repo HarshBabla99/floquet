@@ -36,6 +36,7 @@ class DisplacedState:
         floquet_modes: np.ndarray,
         omega_d_idxs : tuple[int, int] = (0, None),
         amp_idx_0: int = 0, 
+        cartesian_overlaps: bool = False,
     ) -> np.ndarray:
         """Calculate overlap of floquet modes with 'bare' states.
 
@@ -56,19 +57,28 @@ class DisplacedState:
                 overlaps of Floquet modes against. 
                 Shape: (num_states, hilbert_dim, num_fit_terms).
             floquet_modes: Floquet modes to be compared to the bare states given by
-                coefficients. 
-                Shape: (num_omega_d, num_amps, num_states, hilbert_dim).
+                coefficients. The -2 dimension here indexes the modes and the 
+                -1 dimension indexes the hilbert space.
+                Shape: (num_omega_d, num_amps, hilbert_dim, hilbert_dim).
             omega_d_idxs : Indices specifying the lower and upper bound of the drive 
                 frequency range. Selects all `self.model.omega_d_values` by default.
             amp_idx_0: Index specifying the lower bound of the amplitude range. 
                 0 by default, i.e. selects the undriven states. 
+            cartesian_overlaps: If True, compute overlaps between all possible pairs of 
+                displaced states and floquet modes. If False, only compute overlaps of each
+                floquet mode with the corresponding displaced state.
         Returns:
-            Overlaps. Shape: (num_omega_d, num_amps, num_states).
+            Overlaps between all the floquet modes and the displaced states specified
+                by self.state_indices. 
+                If cartesian_overlaps is True, shape: (num_omega_d, num_amps, num_states, num_floquet_modes). Here, the -2 dimension indexes the displaced 
+                state, and the -1 dimension indexes the floquet modes. 
+                If cartesian_overlaps is False, shape: (num_omega_d, num_amps, num_states).
+                Here, only the -1 dimension indexes the states (both displaced and floquet). 
         """
         floquet_modes = floquet_modes[
             omega_d_idxs[0] : omega_d_idxs[1], 
             :, 
-            np.arange(self.state_indices),
+            self.state_indices,
             :
         ]
         displaced_states = self.displaced_state(
@@ -76,7 +86,11 @@ class DisplacedState:
             omega_d_idxs, 
             [amp_idx_0, amp_idx_0+1]
         )[:,0,...]
-        return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
+
+        if cartesian_overlaps:
+            return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
+        else:
+            return np.abs(np.einsum('wth,wash->wats', np.conj(displaced_states), floquet_modes))
 
     def overlap_with_displaced_states(self, 
         coefficients: np.ndarray, 
@@ -105,7 +119,7 @@ class DisplacedState:
         floquet_modes = floquet_modes[
             omega_d_idxs[0] : omega_d_idxs[1], 
             amp_idxs[0] : amp_idxs[1], 
-            np.arange(self.state_indices),
+            self.state_indices,
             :
         ]
         displaced_states = self.displaced_state(coefficients, omega_d_idxs, amp_idxs)
@@ -155,7 +169,7 @@ class DisplacedState:
         # omega_ds and amps. 
         result += np.tile(
             self.model.bare_state_array()[None, None, self.state_indices, :],
-            (*perturbation.shape[:2], 1, 1),
+            (*result.shape[:2], 1, 1),
         )
         
         # Normalize
