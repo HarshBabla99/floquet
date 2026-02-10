@@ -63,15 +63,12 @@ class DisplacedState:
             amp_idx_0: Index specifying the lower bound of the amplitude range. 
                 0 by default, i.e. selects the undriven states. 
             cartesian_overlaps: If True, compute overlaps between all possible pairs of 
-                displaced states and floquet modes. If False, only compute overlaps of each
-                floquet mode with the corresponding displaced state.
+                displaced states and floquet modes. If False, only compute overlaps of
+                each floquet mode with the corresponding displaced state.
         Returns:
-            Overlaps between all the floquet modes and the displaced states specified
-                by self.state_indices. 
-                If cartesian_overlaps is True, shape: (num_omega_d, num_amps, num_states, num_floquet_modes). Here, the -2 dimension indexes the displaced 
-                state, and the -1 dimension indexes the floquet modes. 
-                If cartesian_overlaps is False, shape: (num_omega_d, num_amps, num_states).
-                Here, only the -1 dimension indexes the states (both displaced and floquet). 
+            Overlaps between the floquet modes and corresponding the displaced states
+                specified by self.state_indices. 
+                Shape: (num_omega_d, num_amps, num_states).
         """
         floquet_modes = floquet_modes[
             omega_d_idxs[0] : omega_d_idxs[1], 
@@ -80,15 +77,12 @@ class DisplacedState:
             :
         ]
         displaced_states = self.displaced_state(
-            coefficients, 
-            omega_d_idxs, 
-            [amp_idx_0, amp_idx_0+1]
-        )[:,0,...]
+                coefficients, 
+                omega_d_idxs, 
+                [amp_idx_0, amp_idx_0+1]
+            )[:,0,...]
 
-        if cartesian_overlaps:
-            return np.abs(np.einsum('wth,wash->wats', np.conj(displaced_states), floquet_modes))
-        else:
-            return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
+        return np.abs(np.einsum('wsh,wash->was', np.conj(displaced_states), floquet_modes))
 
     def overlap_with_displaced_states(self, 
         coefficients: np.ndarray, 
@@ -230,8 +224,9 @@ class DisplacedStateFit(DisplacedState):
         specified in options.
 
         Parameters:
-            ovlp_with_bare_states: Overlap with bare states. 
-                Shape: (num_omega_d, num_amps, num_states).
+            ovlp_with_bare_states: Overlap with bare states. Already trimmed to the 
+                relevant range of frequencies and amplitudes.
+                Shape: (num_omega_d_in_range, num_amps_in_range, num_states).
             floquet_modes: Floquet modes. 
                 Shape: (num_omega_ds, num_amps, num_states, hilbert_dim).
             omega_d_idxs : Indices specifying the lower and upper bound of the drive 
@@ -246,12 +241,14 @@ class DisplacedStateFit(DisplacedState):
         # Only fit states that we think haven't run into a transition,
         # and those within the specified bounds
         # mask.shape = (num_omega_ds, num_amps, num_state_indices).
-        mask = np.zeros_like(ovlp_with_bare_states, dtype=bool)
-        mask[
+        mask = (ovlp_with_bare_states > self.options.overlap_cutoff)
+
+        # Required poly_terms
+        poly_terms = self.poly_terms[
             omega_d_idxs[0] : omega_d_idxs[1],
-            amp_idxs[0] : amp_idxs[1]
-        ] = True
-        mask &= (ovlp_with_bare_states > self.options.overlap_cutoff)
+            amp_idxs[0] : amp_idxs[1],
+            :
+        ]
 
         coeffs = np.zeros((
                         len(self.state_indices),
@@ -259,12 +256,13 @@ class DisplacedStateFit(DisplacedState):
                         self.exponent_pairs.shape[-1]
                       ), dtype=complex)
 
-        # Fit each state (TODO: does it help to multiprocess this?)
+        # Fit each state separately, since their masks may differ
         for arr_idx, state_idx in enumerate(self.state_indices):
             coeffs[arr_idx] = self._fit_for_state_idx(
                                     target_states=np.real(floquet_modes[..., state_idx, :]),
                                     mask=mask[..., state_idx],
                                     state_index=state_idx,
+                                    poly_terms=poly_terms,
                                 )
 
         # TODO: return mask, other fit data
@@ -275,6 +273,7 @@ class DisplacedStateFit(DisplacedState):
         target_states: np.ndarray,
         mask: np.ndarray,
         state_index: int,
+        poly_terms: np.ndarray,
     ) -> np.ndarray:
 
         num_fit_terms = self.exponent_pairs.shape[-1]
@@ -291,7 +290,7 @@ class DisplacedStateFit(DisplacedState):
         # Flatten and mask arrays. Resulting rows index masked amp-freq pairs.
         # For the poly_terms matrix, the cols index the fit terms. 
         # For states, the cols index the hilbert_dim
-        masked_poly_terms = self.poly_terms.reshape(-1, num_fit_terms)[mask_flat]
+        masked_poly_terms = poly_terms.reshape(-1, num_fit_terms)[mask_flat]
         masked_target_states = target_states.reshape(-1, self.hilbert_dim)[mask_flat]
 
         # Bare states array (repeated for all amp-freq pairs)
