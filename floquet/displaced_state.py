@@ -5,8 +5,6 @@ import numpy as np
 
 from .model import Model
 from .options import Options
-from .utils.parallel import parallel_map
-
 
 class DisplacedState:
     """Class providing methods for computing displaced states.
