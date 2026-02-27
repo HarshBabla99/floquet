@@ -146,7 +146,7 @@ class FloquetAnalysis(Serializable):
             bare_state_overlap = overlaps[array_idx, f_idx]
             ovlps_and_modes[array_idx, 0] = bare_state_overlap
 
-            # Fix phase uncertainty. 
+            # Fixes phase uncertainty. 
             mode = floquet_modes[f_idx, :]
             basis_state_coeff = np.dot(np.conj(self.model.bare_state_array()[state_idx, :]), mode)
             ovlps_and_modes[array_idx, 1:] = mode/np.sign(basis_state_coeff)
@@ -168,6 +168,7 @@ class FloquetAnalysis(Serializable):
         all_overlaps = np.abs(np.einsum("ij,kj->ik", np.conj(prev_f_modes), f_modes))
         # assume that prev_f_modes_arr have been previously sorted. Question
         # is which k index has max overlap?
+        # TODO: use linear_sum_assignment?
         max_idxs = np.argmax(all_overlaps, axis=1)
         f_modes_ordered = f_modes[max_idxs]
         avg_excitation = self._calculate_mean_excitation(f_modes_ordered)
