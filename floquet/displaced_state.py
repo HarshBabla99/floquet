@@ -73,7 +73,7 @@ class DisplacedState:
         floquet_modes = floquet_modes[
             omega_d_idxs[0] : omega_d_idxs[1], 
             :, 
-            self.state_indices,
+            :,
             :
         ]
         displaced_states = self.displaced_state(
@@ -111,7 +111,7 @@ class DisplacedState:
         floquet_modes = floquet_modes[
             omega_d_idxs[0] : omega_d_idxs[1], 
             amp_idxs[0] : amp_idxs[1], 
-            self.state_indices,
+            :,
             :
         ]
         displaced_states = self.displaced_state(coefficients, omega_d_idxs, amp_idxs)
@@ -259,8 +259,8 @@ class DisplacedStateFit(DisplacedState):
         # Fit each state separately, since their masks may differ
         for arr_idx, state_idx in enumerate(self.state_indices):
             coeffs[arr_idx] = self._fit_for_state_idx(
-                                    target_states=np.real(floquet_modes[..., state_idx, :]),
-                                    mask=mask[..., state_idx],
+                                    target_states=floquet_modes[..., arr_idx, :],
+                                    mask=mask[..., arr_idx],
                                     state_index=state_idx,
                                     poly_terms=poly_terms,
                                 )
@@ -280,12 +280,12 @@ class DisplacedStateFit(DisplacedState):
         mask_flat = mask.ravel()
 
         # Warn if not enough data points to fit
-        if len(mask_flat) < (self.hilbert_dim * num_fit_terms):
+        if np.count_nonzero(mask_flat) < num_fit_terms:
             warnings.warn(
                 "Not enough data points to fit. Returning zeros for the fit",
                 stacklevel=3,
             )
-            return np.zeros((self.hilbert_dim, num_fit_terms), dtype=float)
+            return np.zeros((self.hilbert_dim, num_fit_terms), dtype=complex)
 
         # Flatten and mask arrays. Resulting rows index masked amp-freq pairs.
         # For the poly_terms matrix, the cols index the fit terms. 
@@ -302,15 +302,22 @@ class DisplacedStateFit(DisplacedState):
         # Fit the difference between the target states and the bare states
         masked_states_to_fit = masked_target_states - masked_bare_states
 
+        if np.any(np.abs(masked_states_to_fit) > 1):
+            warnings.warn(
+                "Large values to fit. Fit may be unreliable. Returning zeros for the fit.",
+                stacklevel=3,
+            )
+            return np.zeros((self.hilbert_dim, num_fit_terms), dtype=complex)
+
         # Simple linear fit: masked_states_to_fit = masked_poly_terms @ coefficients.T
         try: 
             popt = np.linalg.lstsq(masked_poly_terms, masked_states_to_fit)[0].T
         
-        except RuntimeError:
+        except np.linalg.LinAlgError:
             warnings.warn(
                 "Fit failed. Returning zeros for the fit",
                 stacklevel=3,
             )
-            popt=np.zeros((self.hilbert_dim, num_fit_terms), dtype=float)
+            popt=np.zeros((self.hilbert_dim, num_fit_terms), dtype=complex)
 
         return popt
