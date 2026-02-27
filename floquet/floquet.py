@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
+from scipy.optimize import linear_sum_assignment
 from qutip import FloquetBasis
 
 from .displaced_state import DisplacedState, DisplacedStateFit
@@ -134,20 +135,22 @@ class FloquetAnalysis(Serializable):
                 [amp_idx_0, amp_idx_0+1]
             )[0,0,...]
         overlaps = np.abs(np.einsum("ij,kj->ik", np.conj(displaced_states), floquet_modes))
-
-        # For each state index, find the floquet mode with the largest overlap
-        f_idxs = np.argmax(np.abs(overlaps), axis=1)
+        # Enforce one-to-one assignment between tracked states and Floquet modes.
+        _, f_idxs = linear_sum_assignment(-overlaps)
 
         ovlps_and_modes = np.zeros(
             (len(self.state_indices), 1 + self.hilbert_dim), dtype=complex
         )
-        for array_idx, _state_idx in enumerate(self.state_indices):
+        for array_idx, state_idx in enumerate(self.state_indices):
             f_idx = f_idxs[array_idx]
             bare_state_overlap = overlaps[array_idx, f_idx]
             ovlps_and_modes[array_idx, 0] = bare_state_overlap
-            ovlps_and_modes[array_idx, 1:] = (
-                np.sign(bare_state_overlap) * floquet_modes[f_idx, :]
-            )
+
+            # Fix phase uncertainty. 
+            mode = floquet_modes[f_idx, :]
+            basis_state_coeff = np.dot(np.conj(self.model.bare_state_array()[state_idx, :]), mode)
+            ovlps_and_modes[array_idx, 1:] = mode/np.sign(basis_state_coeff)
+
         return ovlps_and_modes
 
     def _step_in_amp(
