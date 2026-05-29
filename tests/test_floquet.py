@@ -148,7 +148,10 @@ def test_displaced_bare_state(setup_floquet: tuple):
     )
     for state_idx in floquet_transmon.state_indices:
         ideal_state = qt.basis(floquet_transmon.hilbert_dim, state_idx)
-        disp_coeffs_bare = displaced_state.bare_state_coefficients(state_idx)
+        disp_coeffs_bare = np.zeros(
+            (floquet_transmon.hilbert_dim, len(displaced_state.exponent_pair_idx_map))
+        )
+
         # omega_d and amp values shouldn't matter
         calc_state = displaced_state.displaced_state(
             0.0, 0.0, state_idx, disp_coeffs_bare

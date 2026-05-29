@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import warnings
 
 import numpy as np
@@ -38,8 +37,7 @@ class DisplacedState:
         """Calculate overlap of floquet modes with 'bare' states.
 
         'Bare' here is defined loosely. For the first range of amplitudes, the bare
-        states are truly the bare states (the coefficients are obtained from
-        bare_state_coefficients, which give the bare states). For later ranges, we
+        states are truly the bare states (all zero coefficients). For later ranges, we
         define the bare state as the state obtained from the fit from previous range,
         with amplitude evaluated at the lower edge of amplitudes for the new region.
         This is, in a sense, the most natural choice, since it is most analogous to what
@@ -53,7 +51,8 @@ class DisplacedState:
         Parameters:
             amp_idx_0: Index specifying the lower bound of the amplitude range.
             coefficients: coefficients that specify the bare state that we calculate
-                overlaps of Floquet modes against
+                overlaps of Floquet modes against.
+                Shape: (num_states, hilbert_dim, num_fit_terms).
             floquet_modes: Floquet modes to be compared to the bare states given by
                 coefficients
         Returns:
@@ -147,54 +146,38 @@ class DisplacedState:
             )
         )
 
-    def bare_state_coefficients(self, state_idx: int) -> np.ndarray:
-        r"""For bare state only component is itself.
-
-        Parameters:
-            state_idx: Coefficients for the state $|state_idx\rangle$ that when
-                evaluated at any amplitude or frequency simply return the bare state.
-                Note that this should be the actual state index, and not the array index
-                (for instance if we have state_indices=[0, 1, 3] because we're not
-                interested in the second excited state, for the 3rd excited state we
-                should pass 3 here and not 2).
-        """
-        coefficient_matrix_for_amp_and_state = np.zeros(
-            (self.hilbert_dim, len(self.exponent_pair_idx_map)), dtype=complex
-        )
-        coefficient_matrix_for_amp_and_state[state_idx, 0] = 1.0
-        return coefficient_matrix_for_amp_and_state
-
     def displaced_state(
         self, omega_d: float, amp: float, state_idx: int, coefficients: np.ndarray
     ) -> qt.Qobj:
         """Construct the ideal displaced state based on a polynomial expansion."""
-        return sum(
+        # Compute the perturbation based on the given coefficients.
+        result = sum(
             self._coefficient_for_state(
-                np.array([omega_d, amp]),
-                *coefficients[state_idx_component, :],
-                bare_same=state_idx == state_idx_component,
+                np.array([omega_d, amp]), *coefficients[state_idx_component, :]
             )
             * qt.basis(self.hilbert_dim, state_idx_component)
             for state_idx_component in range(self.hilbert_dim)
-        ).unit()
+        )
+
+        # Add the perturbation to the bare state. Bare states are defined by the model.
+        # Get only the states corresponding to state_idx.
+        result += qt.Qobj(self.model.bare_state_array()[state_idx, :])
+
+        # Normalize and return
+        return result.unit()
 
     def _coefficient_for_state(
-        self,
-        xydata: np.ndarray,
-        *state_idx_coefficients: np.ndarray | tuple,
-        bare_same: bool = False,
+        self, xydata: np.ndarray, *state_idx_coefficients: np.ndarray | tuple
     ) -> np.ndarray | float:
         """Fit function to pass to curve fit, assume a 2D polynomial."""
         exp_pair_map = self.exponent_pair_idx_map
         omega_d, amp = xydata.T
-        result = 1.0 if bare_same else 0.0
-        result += sum(
+        return sum(
             state_idx_coefficients[idx]
             * omega_d ** exp_pair_map[idx][0]
             * amp ** exp_pair_map[idx][1]
             for idx in exp_pair_map
         )
-        return result
 
     def _create_exponent_pair_idx_map(self) -> dict:
         """Create dictionary of terms in polynomial that we fit.
@@ -260,7 +243,15 @@ class DisplacedStateFit(DisplacedState):
 
         def _fit_for_state_idx(array_state_idx: tuple[int, int]) -> np.ndarray:
             array_idx, state_idx = array_state_idx
-            floquet_mode_for_state = floquet_modes[:, :, array_idx, :]
+
+            # Get the floquet mode for the state, and subtract off the bare state
+            # i.e. only fit the perturbation.
+            state_to_fit = floquet_modes[:, :, array_idx, :]
+            state_to_fit -= np.tile(
+                self.model.bare_state_array()[None, None, state_idx, :],
+                (state_to_fit.shape[0], state_to_fit.shape[1], 1),
+            )
+
             mask = ovlp_with_bare_states[:, :, array_idx].ravel()
             # only fit states that we think haven't run into
             # a nonlinear transition (same for omega_d_amp_filtered above)
@@ -279,16 +270,15 @@ class DisplacedStateFit(DisplacedState):
                     stacklevel=3,
                 )
                 return coefficient_matrix_for_amp_and_state
+
+            # Fit each component of the state separately.
             for state_idx_component in range(self.hilbert_dim):
-                floquet_mode_bare_component = floquet_mode_for_state[
-                    :, :, state_idx_component
-                ].ravel()
-                floquet_component_filtered = floquet_mode_bare_component[
+                component = state_to_fit[:, :, state_idx_component].ravel()
+                component_filtered = component[
                     np.abs(mask) > self.options.overlap_cutoff
                 ]
-                bare_same = state_idx_component == state_idx
                 bare_component_fit = self._fit_coefficients_for_component(
-                    omega_d_amp_filtered, floquet_component_filtered, bare_same
+                    omega_d_amp_filtered, component_filtered
                 )
                 coefficient_matrix_for_amp_and_state[state_idx_component, :] = (
                     bare_component_fit
@@ -309,10 +299,7 @@ class DisplacedStateFit(DisplacedState):
         )
 
     def _fit_coefficients_for_component(
-        self,
-        omega_d_amp_filtered: list,
-        floquet_component_filtered: np.ndarray,
-        bare_same: bool,
+        self, omega_d_amp_filtered: list, floquet_component_filtered: np.ndarray
     ) -> np.ndarray:
         """Fit the floquet modes to an "ideal" displaced state based on a polynomial.
 
@@ -323,22 +310,20 @@ class DisplacedStateFit(DisplacedState):
         p0 = np.zeros(len(self.exponent_pair_idx_map))
         # fit the real and imaginary parts of the overlap separately
         popt_r = self._fit_coefficients_factory(
-            omega_d_amp_filtered, np.real(floquet_component_filtered), p0, bare_same
+            omega_d_amp_filtered, np.real(floquet_component_filtered), p0
         )
         popt_i = self._fit_coefficients_factory(
-            omega_d_amp_filtered,
-            np.imag(floquet_component_filtered),
-            p0,
-            False,  # for the imaginary part, constant term should always be zero
+            omega_d_amp_filtered, np.imag(floquet_component_filtered), p0
         )
         return popt_r + 1j * popt_i
 
     def _fit_coefficients_factory(
-        self, XYdata: list, Zdata: np.ndarray, p0: tuple | np.ndarray, bare_same: bool
+        self, XYdata: list, Zdata: np.ndarray, p0: tuple | np.ndarray
     ) -> np.ndarray:
-        poly_fit = functools.partial(self._coefficient_for_state, bare_same=bare_same)
         try:
-            popt, _ = sp.optimize.curve_fit(poly_fit, XYdata, Zdata, p0=p0)
+            popt, _ = sp.optimize.curve_fit(
+                self._coefficient_for_state, XYdata, Zdata, p0=p0
+            )
         except RuntimeError:
             warnings.warn(
                 "fit failed for a bare component, returning zeros for the fit",
