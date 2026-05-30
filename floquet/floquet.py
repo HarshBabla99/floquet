@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 import qutip as qt
+from scipy.optimize import linear_sum_assignment
 
 from .displaced_state import DisplacedState, DisplacedStateFit
 from .model import Model
@@ -141,14 +142,19 @@ class FloquetAnalysis(Serializable):
             ]
         )
         overlaps = np.einsum("ij,jk->ik", ideal_displaced_state_array, f_modes_cols)
-        # take the argmax along k
-        f_idxs = np.argmax(np.abs(overlaps), axis=1)
+
+        # Enforce one-to-one assignment between tracked states and Floquet modes.
+        _, f_idxs = linear_sum_assignment(-np.abs(overlaps))
+
         for array_idx, _state_idx in enumerate(self.state_indices):
             f_idx = f_idxs[array_idx]
             bare_state_overlap = overlaps[array_idx, f_idx]
-            ovlps_and_modes[array_idx, 0] = bare_state_overlap
-            ovlps_and_modes[array_idx, 1:] = (
-                np.sign(bare_state_overlap) * f_modes_cols[:, f_idx]
+            ovlps_and_modes[array_idx, 0] = np.abs(bare_state_overlap)
+
+            # Fix phase uncertainty by ensuring that the bare state overlap is real and
+            # positive.
+            ovlps_and_modes[array_idx, 1:] = f_modes_cols[:, f_idx] / np.sign(
+                bare_state_overlap
             )
         return ovlps_and_modes
 
@@ -180,7 +186,7 @@ class FloquetAnalysis(Serializable):
         all_overlaps = np.abs(np.einsum("ij,kj->ik", np.conj(prev_f_modes), f_modes_0))
         # assume that prev_f_modes_arr have been previously sorted. Question
         # is which k index has max overlap?
-        max_idxs = np.argmax(all_overlaps, axis=1)
+        _, max_idxs = linear_sum_assignment(-all_overlaps)
         f_modes_ordered = f_modes_0[max_idxs]
         avg_excitation = self._calculate_mean_excitation(f_modes_ordered)
         return avg_excitation, f_energies_0[max_idxs], f_modes_ordered
