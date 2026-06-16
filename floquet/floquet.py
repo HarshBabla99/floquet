@@ -152,20 +152,6 @@ class FloquetAnalysis(Serializable):
             )
         return ovlps_and_modes
 
-    def bare_state_array(self) -> np.ndarray:
-        """Return array of bare states.
-
-        Used to specify initial bare states for the Blais branch analysis.
-        """
-        return np.squeeze(
-            np.array(
-                [
-                    qt.basis(self.hilbert_dim, idx).data.to_array()
-                    for idx in range(self.hilbert_dim)
-                ]
-            )
-        )
-
     def _step_in_amp(
         self, f_modes_energies: tuple[qt.Qobj, np.ndarray], prev_f_modes: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -191,7 +177,7 @@ class FloquetAnalysis(Serializable):
         Based on Blais arXiv:2402.06615, specifically Eq. (12) but going without the
         integral over floquet modes in one period.
         """
-        bare_states = self.bare_state_array()
+        bare_states = self.model.bare_state_array()
         overlaps_sq = np.abs(np.einsum("ij,kj->ik", bare_states, f_modes_ordered)) ** 2
         # sum over bare excitations weighted by excitation number
         return np.einsum("ik,i->k", overlaps_sq, np.arange(0, self.hilbert_dim))
@@ -252,7 +238,8 @@ class FloquetAnalysis(Serializable):
         # coefficients, whereas for the Blais calculation, the bare modes are specified
         # as actual kets.
         prev_f_modes_arr = np.tile(
-            self.bare_state_array()[None, :, :], (len(self.model.omega_d_values), 1, 1)
+            self.model.bare_state_array()[None, :, :],
+            (len(self.model.omega_d_values), 1, 1),
         )
         displaced_state = DisplacedStateFit(
             hilbert_dim=self.hilbert_dim,
@@ -260,11 +247,13 @@ class FloquetAnalysis(Serializable):
             state_indices=self.state_indices,
             options=self.options,
         )
-        previous_coefficients = np.array(
-            [
-                displaced_state.bare_state_coefficients(state_idx)
-                for state_idx in self.state_indices
-            ]
+        previous_coefficients = np.zeros(
+            (
+                len(self.state_indices),
+                self.hilbert_dim,
+                len(displaced_state.exponent_pair_idx_map),
+            ),
+            dtype=complex,
         )
 
         num_fit_ranges = int(np.ceil(1 / self.options.fit_range_fraction))
