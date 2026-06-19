@@ -99,16 +99,19 @@ def test_displaced_fit_and_reinit(setup_floquet: tuple, tmp_path: pathlib.Path):
                 omega_d, amp, state_idx=state_idx, coefficients=disp_coeffs[array_idx]
             )
             f_modes_energies = floquet_transmon.run_one_floquet((omega_d, amp))
-            _, identified_modes = floquet_transmon.identify_floquet_modes(
+            _, floquet_mode = floquet_transmon.identify_floquet_modes(
                 f_modes_energies, (omega_d, amp), displaced_state, disp_coeffs
             )
-            overlap = np.abs(qt.Qobj(floquet_mode[array_idx, 1:]).dag() * disp_gs)
+            overlap = np.abs(qt.Qobj(floquet_mode[array_idx, :]).dag() * disp_gs)
             assert 0.98 < overlap < 1.0
 
     reloaded = Result.load(filepath)
     for arr_name in [
-        "bare_state_overlaps", "quasienergies", "avg_excitation",
-        "fit_data", "displaced_state_overlaps",
+        "bare_state_overlaps",
+        "quasienergies",
+        "avg_excitation",
+        "fit_data",
+        "displaced_state_overlaps",
     ]:
         assert np.allclose(getattr(result, arr_name), getattr(reloaded, arr_name))
 
