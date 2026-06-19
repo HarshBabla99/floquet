@@ -9,6 +9,7 @@ from scipy.optimize import linear_sum_assignment
 from .displaced_state import DisplacedState, DisplacedStateFit
 from .model import Model
 from .options import Options
+from .result import Result
 from .utils.file_io import Serializable
 from .utils.parallel import parallel_map
 
@@ -161,7 +162,7 @@ class FloquetAnalysis(Serializable):
 
             # Fix phase uncertainty by ensuring that the bare state overlap is real and
             # positive.
-            identified_modes[array_idx] = floquet_modes[f_idx] / np.sign(
+            identified_modes[array_idx] = f_modes_cols[:, f_idx] / np.sign(
                 bare_state_overlap
             )
         return bare_state_overlaps, identified_modes
@@ -196,7 +197,7 @@ class FloquetAnalysis(Serializable):
         # sum over bare excitations weighted by excitation number
         return np.einsum("ik,i->k", overlaps_sq, np.arange(0, self.hilbert_dim))
 
-    def run(self, filepath: str | None = None) -> dict:
+    def run(self, filepath: str | None = None) -> Result:
         """Perform floquet analysis over range of amplitudes and drive frequencies.
 
         This function largely performs two calculations. The first is the Xiao analysis
@@ -226,25 +227,13 @@ class FloquetAnalysis(Serializable):
         print(self)
         start_time = time.time()
 
-        # initialize all arrays that will contain our data
-        array_shape = (
-            len(self.model.omega_d_values),
-            len(self.model.drive_amplitudes),
-            len(self.state_indices),
+        result = Result(
+            self.model,
+            self.state_indices,
+            self.hilbert_dim,
+            self.options,
+            self.init_data_to_save,
         )
-        bare_state_overlaps = np.zeros(array_shape)
-        # fit over the full range, using states identified by the fit over
-        # intermediate ranges
-        intermediate_displaced_state_overlaps = np.zeros(array_shape)
-        floquet_modes = np.zeros((*array_shape, self.hilbert_dim), dtype=complex)
-        avg_excitation = np.zeros(
-            (
-                len(self.model.omega_d_values),
-                len(self.model.drive_amplitudes),
-                self.hilbert_dim,
-            )
-        )
-        quasienergies = np.zeros_like(avg_excitation)
 
         # for all omega_d, the bare states are identical at zero drive. We define
         # two sets of bare modes (prev_f_modes_arr and disp_coeffs_for_prev_amp)
@@ -296,17 +285,12 @@ class FloquetAnalysis(Serializable):
                 quasienergies_for_range,
                 prev_f_modes_arr,
             ) = output
-            bare_state_overlaps = self._place_into(
-                amp_idxs, bare_state_overlaps_for_range, bare_state_overlaps
-            )
-            floquet_modes = self._place_into(
-                amp_idxs, floquet_modes_for_range, floquet_modes
-            )
-            avg_excitation = self._place_into(
-                amp_idxs, avg_excitation_for_range, avg_excitation
-            )
-            quasienergies = self._place_into(
-                amp_idxs, quasienergies_for_range, quasienergies
+            result.store_for_amp_range(
+                amp_idxs,
+                bare_state_overlaps_for_range,
+                floquet_modes_for_range,
+                avg_excitation_for_range,
+                quasienergies_for_range,
             )
 
             # ovlp_with_bare_states is used as a mask for the fit
@@ -321,16 +305,14 @@ class FloquetAnalysis(Serializable):
             )
             # Compute overlap of floquet modes with ideal displaced state using this
             # new fit. We use this data as the mask for when we compute the coefficients
-            # over the whole range. Note that we pass in floquet_modes as
+            # over the whole range. Note that we pass in result.floquet_modes as
             # opposed to the more restricted floquet_modes_for_range since we
             # use indexing methods inside of overlap_with_displaced_states, so its
             # easier to pass in the whole array.
             overlaps = displaced_state.overlap_with_displaced_states(
-                amp_idxs, new_coefficients, floquet_modes
+                amp_idxs, new_coefficients, result.floquet_modes
             )
-            intermediate_displaced_state_overlaps = self._place_into(
-                amp_idxs, overlaps, intermediate_displaced_state_overlaps
-            )
+            result.store_intermediate_overlaps(amp_idxs, overlaps)
             previous_coefficients = new_coefficients
         # The previously extracted coefficients were valid for the amplitude ranges
         # we asked for the fit over. Now armed with with correctly identified floquet
@@ -344,32 +326,16 @@ class FloquetAnalysis(Serializable):
         amp_idxs = [0, len(self.model.drive_amplitudes)]
         omega_d_amp_slice = list(self.model.omega_d_amp_params(amp_idxs))
         full_displaced_fit = displaced_state.displaced_states_fit(
-            omega_d_amp_slice, intermediate_displaced_state_overlaps, floquet_modes
+            omega_d_amp_slice, result.intermediate_displaced_state_overlaps, result.floquet_modes
         )
         true_overlaps = displaced_state.overlap_with_displaced_states(
-            amp_idxs, full_displaced_fit, floquet_modes
+            amp_idxs, full_displaced_fit, result.floquet_modes
         )
-        data_dict = {
-            "bare_state_overlaps": bare_state_overlaps,
-            "fit_data": full_displaced_fit,
-            "displaced_state_overlaps": true_overlaps,
-            "intermediate_displaced_state_overlaps": intermediate_displaced_state_overlaps,  # noqa E501
-            "quasienergies": quasienergies,
-            "avg_excitation": avg_excitation,
-        }
-        if self.options.save_floquet_modes:
-            data_dict["floquet_modes"] = floquet_modes
-        print(f"finished in {(time.time() - start_time) / 60} minutes")
-        if filepath is not None:
-            self.write_to_file(filepath, data_dict)
-        return data_dict
+        result.store_overall_fit(full_displaced_fit, true_overlaps)
 
-    @staticmethod
-    def _place_into(
-        amp_idxs: list, array_for_range: np.ndarray, overall_array: np.ndarray
-    ) -> np.ndarray:
-        overall_array[:, amp_idxs[0] : amp_idxs[1]] = array_for_range
-        return overall_array
+        print(f"finished in {(time.time() - start_time) / 60} minutes")
+        result.save(filepath)
+        return result
 
     def _floquet_main_for_amp_range(
         self,

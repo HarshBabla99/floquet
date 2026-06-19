@@ -8,6 +8,7 @@ from .floquet import (
     Model as Model,
 )
 from .options import Options as Options
+from .result import Result as Result
 from .utils.file_io import (
     generate_file_path as generate_file_path,
     read_from_file as read_from_file,

@@ -13,6 +13,7 @@ from floquet import (
     Model,
     Options,
     read_from_file,
+    Result,
     XiSqToAmp,
 )
 
@@ -77,7 +78,7 @@ def test_chi_vs_xi(setup_floquet: tuple):
 def test_displaced_fit_and_reinit(setup_floquet: tuple, tmp_path: pathlib.Path):
     floquet_transmon, chi_to_amp, _ = setup_floquet
     filepath = _filepath(tmp_path)
-    data_dict = floquet_transmon.run(filepath=filepath)
+    result = floquet_transmon.run(filepath=filepath)
     # for these random pairs, overlap should be near unity (most
     # pairs don't correspond to a resonance!)
     omega_d_vals = 2.0 * np.pi * np.array([7.5, 9.0, 11.8, 12.7])
@@ -87,7 +88,7 @@ def test_displaced_fit_and_reinit(setup_floquet: tuple, tmp_path: pathlib.Path):
         omega_d_idx = floquet_transmon.model.omega_d_to_idx(omega_d)
         amp = chi_to_amp.amplitudes_for_omega_d(chi_ac)[0, omega_d_idx]
         for array_idx, state_idx in enumerate(floquet_transmon.state_indices):
-            disp_coeffs = data_dict["fit_data"]
+            disp_coeffs = result.fit_data
             displaced_state = DisplacedState(
                 floquet_transmon.hilbert_dim,
                 floquet_transmon.model,
@@ -98,16 +99,18 @@ def test_displaced_fit_and_reinit(setup_floquet: tuple, tmp_path: pathlib.Path):
                 omega_d, amp, state_idx=state_idx, coefficients=disp_coeffs[array_idx]
             )
             f_modes_energies = floquet_transmon.run_one_floquet((omega_d, amp))
-            floquet_mode = floquet_transmon.identify_floquet_modes(
+            _, identified_modes = floquet_transmon.identify_floquet_modes(
                 f_modes_energies, (omega_d, amp), displaced_state, disp_coeffs
             )
             overlap = np.abs(qt.Qobj(floquet_mode[array_idx, 1:]).dag() * disp_gs)
             assert 0.98 < overlap < 1.0
-    floquet_transmon.write_to_file(filepath, data_dict)
-    new_floquet_transmon, new_data_dict = read_from_file(filepath)
-    assert new_floquet_transmon == floquet_transmon
-    for key in data_dict:
-        assert np.allclose(data_dict[key], new_data_dict[key])
+
+    reloaded = Result.load(filepath)
+    for arr_name in [
+        "bare_state_overlaps", "quasienergies", "avg_excitation",
+        "fit_data", "displaced_state_overlaps",
+    ]:
+        assert np.allclose(getattr(result, arr_name), getattr(reloaded, arr_name))
 
 
 def test_one_D_amplitudes(setup_floquet: tuple):
