@@ -106,7 +106,7 @@ class FloquetAnalysis(Serializable):
         params_0: tuple[float, float],
         displaced_state: DisplacedState,
         previous_coefficients: np.ndarray,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Return floquet modes with largest overlap with ideal displaced state.
 
         Also return that overlap value.
@@ -119,6 +119,11 @@ class FloquetAnalysis(Serializable):
                 will be used when calculating overlap of the floquet modes against
                 the 'bare' states specified by previous_coefficients
 
+        Returns:
+            bare_state_overlaps: Shape `(num_states,)`, absolute overlap of each
+                tracked state with its corresponding Floquet mode.
+            identified_modes: Shape `(num_states, hilbert_dim)`, phase-corrected
+                Floquet modes ordered to match state_indices.
         """
         f_modes_0, _ = f_modes_energies
         # construct column vectors to compute overlaps
@@ -126,10 +131,13 @@ class FloquetAnalysis(Serializable):
             [f_modes_0[idx].data.to_array()[:, 0] for idx in range(self.hilbert_dim)],
             dtype=complex,
         ).T
+        
         # return overlap and floquet mode
-        ovlps_and_modes = np.zeros(
-            (len(self.state_indices), 1 + self.hilbert_dim), dtype=complex
+        bare_state_overlaps = np.zeros(len(self.state_indices))
+        identified_modes = np.zeros(
+            (len(self.state_indices), self.hilbert_dim), dtype=complex
         )
+
         # TODO: refactor using overlap_with_bare_states method?
         ideal_displaced_state_array = np.array(
             [
@@ -149,14 +157,14 @@ class FloquetAnalysis(Serializable):
         for array_idx, _state_idx in enumerate(self.state_indices):
             f_idx = f_idxs[array_idx]
             bare_state_overlap = overlaps[array_idx, f_idx]
-            ovlps_and_modes[array_idx, 0] = np.abs(bare_state_overlap)
+            bare_state_overlaps[array_idx] = np.abs(bare_state_overlap)
 
             # Fix phase uncertainty by ensuring that the bare state overlap is real and
             # positive.
-            ovlps_and_modes[array_idx, 1:] = f_modes_cols[:, f_idx] / np.sign(
+            identified_modes[array_idx] = floquet_modes[f_idx] / np.sign(
                 bare_state_overlap
             )
-        return ovlps_and_modes
+        return bare_state_overlaps, identified_modes
 
     def _step_in_amp(
         self, f_modes_energies: tuple[qt.Qobj, np.ndarray], prev_f_modes: np.ndarray
@@ -375,15 +383,19 @@ class FloquetAnalysis(Serializable):
 
         def _run_floquet_and_calculate(
             omega_d: float,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             omega_d_idx = self.model.omega_d_to_idx(omega_d)
             amps_for_omega_d = amp_range_vals[:, omega_d_idx]
-            avg_excitation_arr = np.zeros((len(amps_for_omega_d), self.hilbert_dim))
-            quasienergies_arr = np.zeros_like(avg_excitation_arr)
-            ovlps_and_modes_arr = np.zeros(
-                (len(amps_for_omega_d), len(self.state_indices), 1 + self.hilbert_dim),
-                dtype=complex,
+
+            # arrays to store results
+            n_amps = len(amps_for_omega_d)
+            bare_state_overlaps_arr = np.zeros((n_amps, len(self.state_indices)))
+            floquet_modes_arr = np.zeros(
+                (n_amps, len(self.state_indices), self.hilbert_dim), dtype=complex
             )
+            avg_excitation_arr = np.zeros((n_amps, self.hilbert_dim))
+            quasienergies_arr = np.zeros_like(avg_excitation_arr)
+
             prev_f_modes_for_omega_d = prev_f_modes_arr[omega_d_idx]
             # for evaluating the displaced state (might be dangerous to evaluate
             # outside of fitted window)
@@ -391,10 +403,11 @@ class FloquetAnalysis(Serializable):
             for amp_idx, amp in enumerate(amps_for_omega_d):
                 params = (omega_d, amp)
                 f_modes_energies = self.run_one_floquet(params)
-                ovlps_and_modes = self.identify_floquet_modes(
+                ovlps, modes = self.identify_floquet_modes(
                     f_modes_energies, params_0, displaced_state, previous_coefficients
                 )
-                ovlps_and_modes_arr[amp_idx] = ovlps_and_modes
+                bare_state_overlaps_arr[amp_idx] = ovlps
+                floquet_modes_arr[amp_idx] = modes
                 avg_excitation, quasi_es, new_f_modes_arr = self._step_in_amp(
                     f_modes_energies, prev_f_modes_for_omega_d
                 )
@@ -402,7 +415,8 @@ class FloquetAnalysis(Serializable):
                 quasienergies_arr[amp_idx] = np.real(quasi_es)
                 prev_f_modes_for_omega_d = new_f_modes_arr
             return (
-                ovlps_and_modes_arr,
+                bare_state_overlaps_arr,
+                floquet_modes_arr,
                 avg_excitation_arr,
                 quasienergies_arr,
                 prev_f_modes_for_omega_d,
@@ -416,34 +430,16 @@ class FloquetAnalysis(Serializable):
             )
         )
         (
-            all_modes_quasies_ovlps,
-            all_avg_excitation,
-            all_quasienergies,
-            f_modes_last_amp,
-        ) = list(zip(*floquet_data, strict=True))
-        floquet_mode_array = np.array(all_modes_quasies_ovlps, dtype=complex).reshape(
-            (
-                len(self.model.omega_d_values),
-                len(amp_range_vals),
-                len(self.state_indices),
-                1 + self.hilbert_dim,
-            )
-        )
-        f_modes_last_amp = np.array(f_modes_last_amp, dtype=complex).reshape(
-            (len(self.model.omega_d_values), self.hilbert_dim, self.hilbert_dim)
-        )
-        all_avg_excitation = np.array(all_avg_excitation).reshape(
-            (len(self.model.omega_d_values), len(amp_range_vals), self.hilbert_dim)
-        )
-        all_quasienergies = np.array(all_quasienergies).reshape(
-            (len(self.model.omega_d_values), len(amp_range_vals), self.hilbert_dim)
-        )
-        bare_state_overlaps = floquet_mode_array[..., 0]
-        floquet_modes = floquet_mode_array[..., 1:]
-        return (
             bare_state_overlaps,
             floquet_modes,
-            all_avg_excitation,
-            all_quasienergies,
+            avg_excitation,
+            quasienergies,
             f_modes_last_amp,
+        ) = zip(*floquet_data, strict=True)
+        return (
+            np.stack(bare_state_overlaps),
+            np.stack(floquet_modes),
+            np.stack(avg_excitation),
+            np.stack(quasienergies),
+            np.stack(f_modes_last_amp),
         )
