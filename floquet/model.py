@@ -64,7 +64,7 @@ class Model(Serializable):
         # Representative amplitude axis (i.e. xi_sq or chi_ac)
         # Default: choose the first column of drive_amplitudes
         if rep_amps is None:
-            self.rep_amps = drive_amplitudes[:,0]
+            self.rep_amps = drive_amplitudes[:, 0]
             self.rep_amp_type = "linear_amp"
 
         else:
@@ -109,7 +109,7 @@ class Model(Serializable):
         return np.identity(self.H0.shape[-1], dtype=complex)
 
     @classmethod
-    def hamiltonians_equal(cls, model1, model2: object) -> bool:
+    def hamiltonians_equal(cls, model1: Model, model2: Model) -> bool:
         """Check that H0 and H1 are equal across models."""
         if (not isinstance(model1, Model)) or (not isinstance(model2, Model)):
             return False

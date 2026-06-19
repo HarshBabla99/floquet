@@ -101,7 +101,7 @@ class Result(Serializable):
             data["floquet_modes"] = self.floquet_modes
 
         # Note: write_to_file only save init_attr of the class
-        # So the results must be saved seperately as a dict
+        # So the results must be saved separately as a dict
         if filepath is not None:
             self.write_to_file(filepath, data)
 
@@ -132,10 +132,8 @@ class Result(Serializable):
     # Merge results
     #####
     def _assert_compatible(
-        self, other: Result, 
-        hamiltonians_check_eq: bool,
-        omega_d_check_eq: bool,
-        ) -> None:
+        self, other: Result, hamiltonians_check_eq: bool, omega_d_check_eq: bool
+    ) -> None:
         """Assert shared parameters match between two results."""
         if hamiltonians_check_eq:
             assert Model.hamiltonians_equal(self.model, other.model), (
@@ -149,33 +147,41 @@ class Result(Serializable):
         )
         assert np.allclose(self.model.rep_amps, other.model.rep_amps), (
             f"rep_amps mismatch. "
-            f"problem at idx={int(np.argmax(np.abs(self.model.rep_amps - other.model.rep_amps)))}"
+            f"problem at idx={
+                int(np.argmax(np.abs(self.model.rep_amps - other.model.rep_amps)))
+            }"
         )
 
         if omega_d_check_eq:
             # Assert the equal frequencies
             assert np.allclose(self.model.omega_d_values, other.model.omega_d_values), (
                 f"omega_d_values mismatch. "
-                f"problem at idx={int(np.argmax(
-                    np.abs(self.model.omega_d_values - other.model.omega_d_values)
-                ))}"
+                f"problem at idx={
+                    int(
+                        np.argmax(
+                            np.abs(
+                                self.model.omega_d_values - other.model.omega_d_values
+                            )
+                        )
+                    )
+                }"
             )
         else:
             # Assert equally spaced frequencies
-            omega_ds_diff = np.diff(np.concatenate(
-                [self.model.omega_d_values, other.model.omega_d_values]
-            ))
+            omega_ds_diff = np.diff(
+                np.concatenate([self.model.omega_d_values, other.model.omega_d_values])
+            )
             assert np.allclose(omega_ds_diff, omega_ds_diff[0]), (
                 f"omega_d values aren't equally spaced after merge. "
-                f"problem at idx={int(np.argmax(np.abs(omega_ds_diff - omega_ds_diff[0])))}"
+                f"problem at idx={
+                    int(np.argmax(np.abs(omega_ds_diff - omega_ds_diff[0])))
+                }"
             )
 
     def __add__(self, other: Result) -> Result:
         """Merge along the omega_d axis."""
         self._assert_compatible(
-            other, 
-            hamiltonians_check_eq=True,
-            omega_d_check_eq=False,
+            other, hamiltonians_check_eq=True, omega_d_check_eq=False
         )
 
         # Concatenated frequencies and drive amplitudes
@@ -197,7 +203,10 @@ class Result(Serializable):
             rep_amp_type=self.model.rep_amp_type,
         )
         result = Result(
-            merged_model, self.state_indices, self.hilbert_dim, self.options,
+            merged_model,
+            self.state_indices,
+            self.hilbert_dim,
+            self.options,
             self.init_data_to_save,
         )
         result._save_floquet_modes = (
@@ -229,13 +238,14 @@ class Result(Serializable):
     def __and__(self, other: Result) -> Result:
         """Average the displaced state overlaps."""
         self._assert_compatible(
-            other, 
-            hamiltonians_check_eq=False,
-            omega_d_check_eq=True,
+            other, hamiltonians_check_eq=False, omega_d_check_eq=True
         )
 
         result = Result(
-            self.model, self.state_indices, self.hilbert_dim, self.options,
+            self.model,
+            self.state_indices,
+            self.hilbert_dim,
+            self.options,
             self.init_data_to_save,
         )
         result._save_floquet_modes = False
@@ -252,14 +262,14 @@ class Result(Serializable):
             other.intermediate_displaced_state_overlaps,
         )
         result.displaced_state_overlaps = _mean(
-            self.displaced_state_overlaps,
-            other.displaced_state_overlaps,
+            self.displaced_state_overlaps, other.displaced_state_overlaps
         )
 
         warnings.warn(
             "Bare, intermediate, and displaced state overlaps have been merged. "
             "However, all parameters from the second object have been ignored. "
-            "Furthermore, floquet_modes, avg_excitation, and quasienergies have not been set.",
+            "Furthermore, floquet_modes, avg_excitation, and quasienergies have"
+            "not been set.",
             stacklevel=3,
         )
 

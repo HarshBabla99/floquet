@@ -132,7 +132,7 @@ class FloquetAnalysis(Serializable):
             [f_modes_0[idx].data.to_array()[:, 0] for idx in range(self.hilbert_dim)],
             dtype=complex,
         ).T
-        
+
         # return overlap and floquet mode
         bare_state_overlaps = np.zeros(len(self.state_indices))
         identified_modes = np.zeros(
@@ -326,7 +326,9 @@ class FloquetAnalysis(Serializable):
         amp_idxs = [0, len(self.model.drive_amplitudes)]
         omega_d_amp_slice = list(self.model.omega_d_amp_params(amp_idxs))
         full_displaced_fit = displaced_state.displaced_states_fit(
-            omega_d_amp_slice, result.intermediate_displaced_state_overlaps, result.floquet_modes
+            omega_d_amp_slice,
+            result.intermediate_displaced_state_overlaps,
+            result.floquet_modes,
         )
         true_overlaps = displaced_state.overlap_with_displaced_states(
             amp_idxs, full_displaced_fit, result.floquet_modes
