@@ -127,3 +127,140 @@ class Result(Serializable):
             result.floquet_modes = data["floquet_modes"]
 
         return result
+
+    #####
+    # Merge results
+    #####
+    def _assert_compatible(
+        self, other: Result, 
+        hamiltonians_check_eq: bool,
+        omega_d_check_eq: bool,
+        ) -> None:
+        """Assert shared parameters match between two results."""
+        if hamiltonians_check_eq:
+            assert Model.hamiltonians_equal(self.model, other.model), (
+                "Hamiltonians mismatch (either H0 or H1 differ)"
+            )
+        assert self.state_indices == other.state_indices, (
+            f"state_indices mismatch: {self.state_indices} vs {other.state_indices}"
+        )
+        assert self.hilbert_dim == other.hilbert_dim, (
+            f"hilbert_dim mismatch: {self.hilbert_dim} vs {other.hilbert_dim}"
+        )
+        assert np.allclose(self.model.rep_amps, other.model.rep_amps), (
+            f"rep_amps mismatch. "
+            f"problem at idx={int(np.argmax(np.abs(self.model.rep_amps - other.model.rep_amps)))}"
+        )
+
+        if omega_d_check_eq:
+            # Assert the equal frequencies
+            assert np.allclose(self.model.omega_d_values, other.model.omega_d_values), (
+                f"omega_d_values mismatch. "
+                f"problem at idx={int(np.argmax(
+                    np.abs(self.model.omega_d_values - other.model.omega_d_values)
+                ))}"
+            )
+        else:
+            # Assert equally spaced frequencies
+            omega_ds_diff = np.diff(np.concatenate(
+                [self.model.omega_d_values, other.model.omega_d_values]
+            ))
+            assert np.allclose(omega_ds_diff, omega_ds_diff[0]), (
+                f"omega_d values aren't equally spaced after merge. "
+                f"problem at idx={int(np.argmax(np.abs(omega_ds_diff - omega_ds_diff[0])))}"
+            )
+
+    def __add__(self, other: Result) -> Result:
+        """Merge along the omega_d axis."""
+        self._assert_compatible(
+            other, 
+            hamiltonians_check_eq=True,
+            omega_d_check_eq=False,
+        )
+
+        # Concatenated frequencies and drive amplitudes
+        merged_omega_d = np.concatenate(
+            [self.model.omega_d_values, other.model.omega_d_values]
+        )
+        merged_drive_amps = np.concatenate(
+            [self.model.drive_amplitudes, other.model.drive_amplitudes], axis=1
+        )
+
+        # New model and result
+        # (keeps self's options, other's options are ignored)
+        merged_model = Model(
+            H0=self.model.H0,
+            H1=self.model.H1,
+            omega_d_values=merged_omega_d,
+            drive_amplitudes=merged_drive_amps,
+            rep_amps=self.model.rep_amps,
+            rep_amp_type=self.model.rep_amp_type,
+        )
+        result = Result(
+            merged_model, self.state_indices, self.hilbert_dim, self.options,
+            self.init_data_to_save,
+        )
+        result._save_floquet_modes = (
+            self._save_floquet_modes or other._save_floquet_modes
+        )
+
+        # Concatenate results
+        def _concatenate(arr1: np.ndarray, arr2: np.ndarray) -> np.ndarray:
+            return np.concatenate([arr1, arr2], axis=0)
+
+        result.bare_state_overlaps = _concatenate(
+            self.bare_state_overlaps, other.bare_state_overlaps
+        )
+        result.intermediate_displaced_state_overlaps = _concatenate(
+            self.intermediate_displaced_state_overlaps,
+            other.intermediate_displaced_state_overlaps,
+        )
+        result.floquet_modes = _concatenate(self.floquet_modes, other.floquet_modes)
+        result.avg_excitation = _concatenate(self.avg_excitation, other.avg_excitation)
+        result.quasienergies = _concatenate(self.quasienergies, other.quasienergies)
+
+        warnings.warn(
+            "Results have been merged. However, displaced states must be refit.",
+            stacklevel=3,
+        )
+
+        return result
+
+    def __and__(self, other: Result) -> Result:
+        """Average the displaced state overlaps."""
+        self._assert_compatible(
+            other, 
+            hamiltonians_check_eq=False,
+            omega_d_check_eq=True,
+        )
+
+        result = Result(
+            self.model, self.state_indices, self.hilbert_dim, self.options,
+            self.init_data_to_save,
+        )
+        result._save_floquet_modes = False
+
+        # Average results
+        def _mean(arr1: np.ndarray, arr2: np.ndarray) -> np.ndarray:
+            return np.mean([arr1, arr2], axis=0)
+
+        result.bare_state_overlaps = _mean(
+            self.bare_state_overlaps, other.bare_state_overlaps
+        )
+        result.intermediate_displaced_state_overlaps = _mean(
+            self.intermediate_displaced_state_overlaps,
+            other.intermediate_displaced_state_overlaps,
+        )
+        result.displaced_state_overlaps = _mean(
+            self.displaced_state_overlaps,
+            other.displaced_state_overlaps,
+        )
+
+        warnings.warn(
+            "Bare, intermediate, and displaced state overlaps have been merged. "
+            "However, all parameters from the second object have been ignored. "
+            "Furthermore, floquet_modes, avg_excitation, and quasienergies have not been set.",
+            stacklevel=3,
+        )
+
+        return result

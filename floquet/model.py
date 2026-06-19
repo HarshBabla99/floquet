@@ -26,6 +26,8 @@ class Model(Serializable):
             these amplitudes are used for all omega_d, or it can be two dimensional
             in which case the first dimension are the amplitudes to scan over
             and the second are the amplitudes for respective drive frequencies
+        rep_amps: Representative amplitudes (e.g. $\xi^2$ or $\chi_{\rm ac}$)
+        rep_amp_type: Type of representative amplitude
 
     """
 
@@ -35,6 +37,8 @@ class Model(Serializable):
         H1: qt.Qobj | np.ndarray | list,
         omega_d_values: np.ndarray,
         drive_amplitudes: np.ndarray,
+        rep_amps: np.ndarray | None = None,
+        rep_amp_type: str | None = None,
     ):
         if not isinstance(H0, qt.Qobj):
             H0 = qt.Qobj(np.array(H0, dtype=complex))
@@ -53,6 +57,23 @@ class Model(Serializable):
         self.H1 = H1
         self.omega_d_values = omega_d_values
         self.drive_amplitudes = drive_amplitudes
+
+        if isinstance(rep_amp_type, (bytes, np.bytes_)):
+            rep_amp_type = rep_amp_type.decode()
+
+        # Representative amplitude axis (i.e. xi_sq or chi_ac)
+        # Default: choose the first column of drive_amplitudes
+        if rep_amps is None:
+            self.rep_amps = drive_amplitudes[:,0]
+            self.rep_amp_type = "linear_amp"
+
+        else:
+            self.rep_amps = rep_amps
+            if rep_amp_type not in ["linear_amp", "xi_sq", "chi_ac"]:
+                raise ValueError(
+                    "rep_amp_type not supported. Valid types: linear_amp, xi_sq, chi_ac"
+                )
+            self.rep_amp_type = rep_amp_type
 
     def omega_d_to_idx(self, omega_d: float) -> np.ndarray[int]:
         """Return index corresponding to omega_d value."""
@@ -86,3 +107,13 @@ class Model(Serializable):
     def bare_state_array(self) -> np.ndarray:
         """Return array of bare states."""
         return np.identity(self.H0.shape[-1], dtype=complex)
+
+    @classmethod
+    def hamiltonians_equal(cls, model1, model2: object) -> bool:
+        """Check that H0 and H1 are equal across models."""
+        if (not isinstance(model1, Model)) or (not isinstance(model2, Model)):
+            return False
+        return bool(
+            np.allclose(model1.H0.full(), model2.H0.full())
+            and np.allclose(model1.H1.full(), model2.H1.full())
+        )
