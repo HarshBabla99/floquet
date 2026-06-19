@@ -10,7 +10,7 @@ from .utils.file_io import Serializable
 
 
 class Model(Serializable):
-    """Specify the model, including the Hamiltonian, drive strengths and frequencies.
+    r"""Specify the model, including the Hamiltonian, drive strengths and frequencies.
 
     Can be subclassed to e.g. override the hamiltonian() method for a different (but
     still periodic!) Hamiltonian.
