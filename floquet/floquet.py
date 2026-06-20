@@ -397,17 +397,4 @@ class FloquetAnalysis(Serializable):
                 self.model.omega_d_values,
             )
         )
-        (
-            bare_state_overlaps,
-            floquet_modes,
-            avg_excitation,
-            quasienergies,
-            f_modes_last_amp,
-        ) = zip(*floquet_data, strict=True)
-        return (
-            np.stack(bare_state_overlaps),
-            np.stack(floquet_modes),
-            np.stack(avg_excitation),
-            np.stack(quasienergies),
-            np.stack(f_modes_last_amp),
-        )
+        return tuple(np.stack(arr) for arr in zip(*floquet_data, strict=True))
